@@ -10,6 +10,8 @@ import {
   readTaskFile,
   writeTaskFile,
   appendActivity,
+  appendComment,
+  readComments,
   withWriteLock,
   validateWorkspacePath,
   findGitRoot,
@@ -23,6 +25,7 @@ import {
   CreateProjectSchema,
   CreateTaskSchema,
   UpdateTaskSchema,
+  CreateCommentSchema,
   canTransition,
   LEASE_DURATION_MS,
   isPendingReview,
@@ -409,6 +412,7 @@ export function getTask(projectId: string, taskId: string) {
     updatedAt: frontmatter.updated_at,
     completedAt: frontmatter.completed_at ?? null,
     activities: activities.reverse(),
+    comments: readComments(project.workspacePath, taskId),
     lease: lease ?? null,
   };
 }
@@ -420,9 +424,17 @@ export function getTaskByUid(taskUid: string) {
   return getTask(row.projectId, row.id);
 }
 
-export function createTask(projectId: string, input: z.infer<typeof CreateTaskSchema>) {
+export function createTask(
+  projectId: string,
+  input: z.infer<typeof CreateTaskSchema>,
+  actor: 'human' | 'agent' = 'human',
+) {
   const project = getProject(projectId);
   if (project.bindingStatus !== 'ok') throw new ValidationError('workspace 不可用');
+
+  const actorName = actor === 'agent' ? (input.agent_name ?? 'agent') : undefined;
+  const hasAcceptance = (input.acceptance_criteria ?? '').trim().length > 0;
+  const status = actor === 'agent' && hasAcceptance ? 'todo' : 'draft';
 
   return withWriteLock(project.workspacePath, () => {
     const config = readProjectConfig(project.workspacePath)!;
@@ -433,13 +445,14 @@ export function createTask(projectId: string, input: z.infer<typeof CreateTaskSc
       id: taskId,
       uid: uuidv4(),
       title: input.title,
-      status: 'draft',
+      status,
       version: 1,
       human_reviewed: false,
       created_at: ts,
       updated_at: ts,
-      created_by: 'human',
-      updated_by: 'human',
+      created_by: actor,
+      updated_by: actor,
+      updated_by_name: actorName ?? null,
       goal: input.goal ?? '',
       acceptance_criteria: input.acceptance_criteria ?? '',
       constraints: input.constraints ?? '',
@@ -460,8 +473,10 @@ export function createTask(projectId: string, input: z.infer<typeof CreateTaskSc
     writeProjectConfig(project.workspacePath, config);
 
     syncTaskToDb(projectId, project.workspacePath, frontmatter, `.pm-ai/tasks/${taskId}.md`);
-    logActivity(project.workspacePath, projectId, taskId, 'human', 'created', {
+    logActivity(project.workspacePath, projectId, taskId, actor, 'created', {
+      actorName,
       summary: `建立任務：${input.title}`,
+      toStatus: status,
     });
 
     return { ...frontmatter, body, projectId, workspacePath: project.workspacePath };
@@ -900,6 +915,56 @@ export function getDashboard(projectId: string) {
       pendingReview: pendingReview.length,
     },
   };
+}
+
+export function listComments(projectId: string, taskId: string) {
+  getTask(projectId, taskId);
+  const project = getProject(projectId);
+  return readComments(project.workspacePath, taskId);
+}
+
+export function addComment(
+  projectId: string,
+  taskId: string,
+  input: z.infer<typeof CreateCommentSchema>,
+  actor: 'human' | 'agent',
+) {
+  getTask(projectId, taskId);
+  const project = getProject(projectId);
+  const body = input.body.trim();
+  if (!body) throw new ValidationError('評論內容不可為空');
+
+  const actorName = actor === 'agent' ? (input.agent_name ?? 'agent') : null;
+  const entry = {
+    id: uuidv4(),
+    at: now(),
+    task_id: taskId,
+    actor,
+    actor_name: actorName,
+    body,
+  };
+
+  return withWriteLock(project.workspacePath, () => {
+    appendComment(project.workspacePath, entry);
+    const db = getDb();
+    db.insert(schema.comments)
+      .values({
+        id: entry.id,
+        projectId,
+        taskId,
+        at: entry.at,
+        actor,
+        actorName,
+        body,
+      })
+      .run();
+    logActivity(project.workspacePath, projectId, taskId, actor, 'commented', {
+      actorName: actorName ?? undefined,
+      summary: body.length > 80 ? `${body.slice(0, 80)}…` : body,
+      body,
+    });
+    return entry;
+  });
 }
 
 export function getRecentApiActivity() {

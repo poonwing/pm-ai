@@ -37,6 +37,10 @@ export function getProjectConfigPath(workspacePath: string): string {
   return path.join(getPmAiDir(workspacePath), 'project.yml');
 }
 
+export function getCommentsDir(workspacePath: string): string {
+  return path.join(getPmAiDir(workspacePath), 'comments');
+}
+
 export function getLocksDir(workspacePath: string): string {
   return path.join(getPmAiDir(workspacePath), 'locks');
 }
@@ -50,6 +54,7 @@ export const PM_AI_README = `# PM-AI Workspace
 - \`project.yml\` — 專案設定
 - \`tasks/\` — 任務檔案（markdown + YAML frontmatter）
 - \`activity/\` — 活動日誌（jsonl）
+- \`comments/\` — 任務評論（每任務一個 jsonl）
 
 ## 重要約定
 

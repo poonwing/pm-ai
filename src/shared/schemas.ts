@@ -106,6 +106,7 @@ export const CreateTaskSchema = z.object({
   acceptance_criteria: z.string().optional(),
   constraints: z.string().optional(),
   agent_notes: z.string().optional(),
+  agent_name: z.string().min(1).optional(),
 });
 
 export const UpdateTaskSchema = z.object({
@@ -152,6 +153,11 @@ export const RejectReviewSchema = z.object({
 
 export const CancelTaskSchema = z.object({
   reason: z.string().optional(),
+});
+
+export const CreateCommentSchema = z.object({
+  body: z.string().min(1).max(8000),
+  agent_name: z.string().min(1).optional(),
 });
 
 export const PORT = 7432;

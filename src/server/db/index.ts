@@ -70,6 +70,16 @@ function runMigrations(sqlite: Database.Database) {
       body TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_activity_task ON activity_logs(task_id, at);
+    CREATE TABLE IF NOT EXISTS comments (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      task_id TEXT NOT NULL,
+      at TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      actor_name TEXT,
+      body TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_comments_task ON comments(task_id, at);
   `);
 }
 

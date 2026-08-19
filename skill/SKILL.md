@@ -2,8 +2,8 @@
 name: pm-ai-agent
 description: >-
   Connect to the local PM-AI task management API. Use when the user wants to
-  fetch, claim, work on, or complete tasks managed by PM-AI. Read inbox,
-  claim tasks, report progress, and mark complete via REST API.
+  create, fetch, claim, work on, or complete tasks managed by PM-AI. Create
+  tasks, read inbox, claim, report progress, and mark complete via REST API.
 metadata:
   surfaces:
     - ide
@@ -13,12 +13,14 @@ metadata:
 
 # PM-AI Agent Skill
 
-Connect to the local PM-AI project management system as an **executor agent**.
+Connect to the local PM-AI project management system as an **executor agent** that can also create tasks.
 
 ## Important Rules
 
-- You are an **executor only**: claim, progress, complete, or release tasks
-- **DO NOT** create tasks, publish drafts, cancel, approve reviews, or reopen tasks
+- You **MAY** create tasks (see below)
+- You **MAY** claim, progress, complete, or release tasks
+- You **MAY** comment on any task
+- **DO NOT** publish drafts, cancel, approve reviews, or reopen tasks
 - **DO NOT** directly edit files under `.pm-ai/tasks/` — use the API for status changes
 - You **MAY** read task markdown files and edit business files in the workspace
 
@@ -39,6 +41,27 @@ Content-Type: application/json
 ```
 
 ## Workflow
+
+### 0. Create a task (optional)
+
+First list projects if you need a `project_id`:
+
+```http
+GET /api/v1/projects
+```
+
+```http
+POST /api/v1/projects/{project_id}/tasks
+{
+  "title": "修登入頁溢位",
+  "goal": "小螢幕不再橫向溢出",
+  "acceptance_criteria": "- [ ] 375px 寬度下無橫向捲動",
+  "constraints": "不要重構無關檔案",
+  "agent_name": "cursor"
+}
+```
+
+If `acceptance_criteria` is filled, the task is created as `todo` and appears in the inbox. If it is empty, the task is created as `draft` and waits for a human to publish.
 
 ### 1. Check inbox
 
@@ -101,6 +124,21 @@ POST /api/v1/tasks/{task_id}/release?project_id={project_id}
 ```
 
 Returns task to `todo`.
+
+### 8. Comment on a task
+
+Humans and agents can comment freely. No lease required.
+
+```http
+GET /api/v1/tasks/{task_id}/comments?project_id={project_id}
+```
+
+```http
+POST /api/v1/tasks/{task_id}/comments?project_id={project_id}
+{"body": "需要補上測試案例", "agent_name": "cursor"}
+```
+
+Comments also appear on `GET /api/v1/tasks/{task_id}`.
 
 ## Error Handling
 

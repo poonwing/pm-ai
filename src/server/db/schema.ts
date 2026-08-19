@@ -42,6 +42,18 @@ export const leases = sqliteTable('leases', {
   createdAt: text('created_at').notNull(),
 });
 
+export const comments = sqliteTable('comments', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id')
+    .notNull()
+    .references(() => projects.id),
+  taskId: text('task_id').notNull(),
+  at: text('at').notNull(),
+  actor: text('actor').notNull(),
+  actorName: text('actor_name'),
+  body: text('body').notNull(),
+});
+
 export const activityLogs = sqliteTable('activity_logs', {
   id: text('id').primaryKey(),
   projectId: text('project_id')

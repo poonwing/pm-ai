@@ -41,8 +41,8 @@ npm start
 
 詳見 [`skill/SKILL.md`](skill/SKILL.md)。
 
-Agent 只能：認領待處理、寫進度、完成、釋放。
-Agent 不能：建任務、發布、取消、驗收。
+Agent 可以：建立任務、認領待處理、寫進度、完成、釋放、評論。
+Agent 不能：發布草稿、取消、驗收。
 
 ## 資料位置
 
@@ -51,6 +51,7 @@ Agent 不能：建任務、發布、取消、驗收。
 | 任務檔案 | `<workspace>/.pm-ai/tasks/*.md` |
 | 專案設定 | `<workspace>/.pm-ai/project.yml` |
 | 活動日誌 | `<workspace>/.pm-ai/activity/*.jsonl` |
+| 任務評論 | `<workspace>/.pm-ai/comments/{任務ID}.jsonl` |
 | 索引/租約 | `%APPDATA%/pm-ai/pm-ai.sqlite` |
 | API 設定 | `%APPDATA%/pm-ai/config.json` |
 

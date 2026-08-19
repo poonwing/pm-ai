@@ -90,7 +90,18 @@ export interface Task {
   artifacts?: string[];
   rejections?: Array<{ reason: string; at: string; by: string }>;
   activities?: ActivityLog[];
+  comments?: TaskComment[];
   lease?: Lease | null;
+}
+
+export interface TaskComment {
+  id: string;
+  at: string;
+  task_id?: string;
+  actor: string;
+  actor_name?: string | null;
+  actorName?: string | null;
+  body: string;
 }
 
 export interface ActivityLog {
@@ -193,6 +204,13 @@ export const tasksApi = {
     }),
   unlock: (projectId: string, taskId: string) =>
     api<Task>(`/tasks/${taskId}/unlock?project_id=${projectId}`, { method: 'POST' }),
+  listComments: (projectId: string, taskId: string) =>
+    api<TaskComment[]>(`/tasks/${taskId}/comments?project_id=${projectId}`),
+  addComment: (projectId: string, taskId: string, body: string) =>
+    api<TaskComment>(`/tasks/${taskId}/comments?project_id=${projectId}`, {
+      method: 'POST',
+      body: JSON.stringify({ body }),
+    }),
 };
 
 export const configApi = {

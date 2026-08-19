@@ -23,6 +23,7 @@ import {
   ReleaseTaskSchema,
   RejectReviewSchema,
   CancelTaskSchema,
+  CreateCommentSchema,
   TASK_STATUSES,
   STATUS_LABELS,
   PORT,
@@ -234,10 +235,11 @@ app.get('/api/v1/projects/:id/tasks', authMiddleware('any'), (c) => {
   }
 });
 
-app.post('/api/v1/projects/:id/tasks', authMiddleware('human'), zValidator('json', CreateTaskSchema), (c) => {
+app.post('/api/v1/projects/:id/tasks', authMiddleware('any'), zValidator('json', CreateTaskSchema), (c) => {
   try {
     const body = c.req.valid('json');
-    return c.json(taskService.createTask(requireParam(c, 'id'), body), 201);
+    const actor = c.get('actor') ?? 'human';
+    return c.json(taskService.createTask(requireParam(c, 'id'), body, actor), 201);
   } catch (err) {
     return errorResponse(c, err);
   }
@@ -262,6 +264,34 @@ app.get('/api/v1/tasks/:id', authMiddleware('any'), (c) => {
     return errorResponse(c, err);
   }
 });
+
+app.get('/api/v1/tasks/:id/comments', authMiddleware('any'), (c) => {
+  try {
+    const projectId = requireProjectId(c);
+    return c.json(taskService.listComments(projectId, requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post(
+  '/api/v1/tasks/:id/comments',
+  authMiddleware('any'),
+  zValidator('json', CreateCommentSchema),
+  (c) => {
+    try {
+      const projectId = requireProjectId(c);
+      const actor = c.get('actor') ?? 'human';
+      const body = c.req.valid('json');
+      return c.json(
+        taskService.addComment(projectId, requireParam(c, 'id'), body, actor),
+        201,
+      );
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  },
+);
 
 app.patch('/api/v1/tasks/:id', authMiddleware('human'), zValidator('json', UpdateTaskSchema), (c) => {
   try {

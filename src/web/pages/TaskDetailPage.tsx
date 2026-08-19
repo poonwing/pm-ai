@@ -20,6 +20,8 @@ export function TaskDetailPage() {
   const [rejectReason, setRejectReason] = useState('');
   const [showCancel, setShowCancel] = useState(false);
   const [cancelReason, setCancelReason] = useState('');
+  const [commentDraft, setCommentDraft] = useState('');
+  const [commentSending, setCommentSending] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const load = useCallback(async () => {
@@ -290,11 +292,11 @@ export function TaskDetailPage() {
             </section>
           )}
 
-          {task.activities && task.activities.length > 0 && (
+          {task.activities && task.activities.filter((a) => a.action !== 'commented').length > 0 && (
             <section className="rounded-lg border border-border p-4">
               <h3 className="text-sm font-semibold mb-3">Agent 活動</h3>
               <div className="flex flex-col gap-2">
-                {[...task.activities].reverse().map((a) => (
+                {[...task.activities].filter((a) => a.action !== 'commented').reverse().map((a) => (
                   <div key={a.id} className="text-xs">
                     <span className="text-muted-foreground">{formatRelativeTime(a.at)}</span>
                     {' · '}
@@ -320,6 +322,59 @@ export function TaskDetailPage() {
             )}
         </div>
       </div>
+
+      <section className="mt-8 rounded-lg border border-border p-4">
+        <h2 className="text-sm font-semibold mb-3">評論</h2>
+        <div className="flex flex-col gap-3 mb-4">
+          {(task.comments ?? []).length === 0 && (
+            <p className="text-sm text-muted-foreground">還沒有評論。人和 Agent 都可以在這裡留言。</p>
+          )}
+          {(task.comments ?? []).map((c) => {
+            const name = c.actor_name ?? c.actorName ?? (c.actor === 'agent' ? 'Agent' : '你');
+            const isAgent = c.actor === 'agent';
+            return (
+              <div key={c.id} className="rounded-md border border-border p-3">
+                <div className="flex items-center gap-2 mb-1">
+                  <Badge className={isAgent ? 'text-amber-700 border-amber-300 bg-amber-50' : 'text-zinc-600 border-zinc-300 bg-zinc-50'}>
+                    {isAgent ? `Agent · ${name}` : '你'}
+                  </Badge>
+                  <span className="text-xs text-muted-foreground">{formatRelativeTime(c.at)}</span>
+                </div>
+                <p className="text-sm whitespace-pre-wrap">{c.body}</p>
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex flex-col gap-2">
+          <Textarea
+            value={commentDraft}
+            onChange={(e) => setCommentDraft(e.target.value)}
+            rows={3}
+            placeholder="寫一則評論…"
+          />
+          <div className="flex justify-end">
+            <Button
+              disabled={!commentDraft.trim() || commentSending}
+              onClick={async () => {
+                if (!projectId || !taskId || !commentDraft.trim()) return;
+                setCommentSending(true);
+                setError('');
+                try {
+                  await tasksApi.addComment(projectId, taskId, commentDraft.trim());
+                  setCommentDraft('');
+                  await load();
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : '發送失敗');
+                } finally {
+                  setCommentSending(false);
+                }
+              }}
+            >
+              {commentSending ? '發送中…' : '發送評論'}
+            </Button>
+          </div>
+        </div>
+      </section>
 
       <Dialog open={showReject} onClose={() => setShowReject(false)} title="打回任務">
         <div className="flex flex-col gap-3">

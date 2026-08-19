@@ -17,6 +17,7 @@ import {
   getActivityDir,
   getProjectConfigPath,
   getLocksDir,
+  getCommentsDir,
   PM_AI_README,
   PM_AI_GITIGNORE,
 } from '../paths.js';
@@ -34,6 +35,7 @@ export function ensurePmAiStructure(workspacePath: string): void {
   const pmAiDir = getPmAiDir(workspacePath);
   fs.mkdirSync(getTasksDir(workspacePath), { recursive: true });
   fs.mkdirSync(getActivityDir(workspacePath), { recursive: true });
+  fs.mkdirSync(getCommentsDir(workspacePath), { recursive: true });
   fs.mkdirSync(getLocksDir(workspacePath), { recursive: true });
   fs.mkdirSync(path.join(pmAiDir, 'cache'), { recursive: true });
 
@@ -111,6 +113,42 @@ export function appendActivity(workspacePath: string, entry: ActivityEntry): voi
   ensurePmAiStructure(workspacePath);
   const filePath = getActivityFilePath(workspacePath);
   fs.appendFileSync(filePath, JSON.stringify(entry) + '\n', 'utf-8');
+}
+
+export interface CommentEntry {
+  id: string;
+  at: string;
+  task_id: string;
+  actor: ActorType;
+  actor_name?: string | null;
+  body: string;
+}
+
+export function getCommentsFilePath(workspacePath: string, taskId: string): string {
+  return path.join(getCommentsDir(workspacePath), `${taskId}.jsonl`);
+}
+
+export function appendComment(workspacePath: string, entry: CommentEntry): void {
+  ensurePmAiStructure(workspacePath);
+  const filePath = getCommentsFilePath(workspacePath, entry.task_id);
+  fs.appendFileSync(filePath, JSON.stringify(entry) + '\n', 'utf-8');
+}
+
+export function readComments(workspacePath: string, taskId: string): CommentEntry[] {
+  const filePath = getCommentsFilePath(workspacePath, taskId);
+  if (!fs.existsSync(filePath)) return [];
+  const raw = fs.readFileSync(filePath, 'utf-8').trim();
+  if (!raw) return [];
+  const entries: CommentEntry[] = [];
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    try {
+      entries.push(JSON.parse(line) as CommentEntry);
+    } catch {
+      // skip malformed lines
+    }
+  }
+  return entries;
 }
 
 export function readActivities(
