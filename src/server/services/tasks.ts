@@ -32,6 +32,7 @@ import {
   LEASE_DURATION_MS,
   isPendingReview,
   IsolationStatus,
+  type TaskGitStatus,
 } from '../../shared/schemas.js';
 import type { z } from 'zod';
 import {
@@ -39,6 +40,16 @@ import {
   getExecutionPath,
   openInCursor,
   removeTaskWorktree,
+  localBranchExists,
+  isBranchMergedInto,
+  getWorktreeDirty,
+  worktreePathExists,
+  mergeBranch,
+  deleteLocalBranch,
+  resolveDefaultMergeTarget,
+  collectMergeCheckTargets,
+  listLocalBranches,
+  hasUncommittedChanges,
 } from './git.js';
 import { installPmAiSkill } from './skill-install.js';
 import {
@@ -76,6 +87,23 @@ export class ValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'ValidationError';
+  }
+}
+
+export class MergeConflictError extends ValidationError {
+  constructor(
+    message: string,
+    public conflicts: string[],
+  ) {
+    super(message);
+    this.name = 'MergeConflictError';
+  }
+}
+
+export class AlreadyMergedError extends ValidationError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AlreadyMergedError';
   }
 }
 
@@ -625,6 +653,8 @@ export function createTask(
       isolation_status: 'none',
       isolation_error: null,
       use_isolation: input.use_isolation ?? false,
+      merged_into: null,
+      merged_at: null,
     };
 
     const body = input.goal
@@ -1211,6 +1241,11 @@ export function removeTaskIsolation(projectId: string, taskId: string) {
     throw new ValidationError('此任務沒有可清理的 worktree');
   }
 
+  const isFailed = task.isolation_status === 'failed';
+  if (!isFailed && !task.humanReviewed) {
+    throw new ValidationError('請先驗收通過後再刪除 worktree');
+  }
+
   void stopPreview(task.uid).catch(() => undefined);
 
   const removal = removeTaskWorktree(project.gitRoot, task.worktree_path);
@@ -1224,8 +1259,301 @@ export function removeTaskIsolation(projectId: string, taskId: string) {
     (fm, body) => {
       fm.isolation_status = 'removed';
       fm.isolation_error = null;
+      fm.worktree_path = null;
       logActivity(project.workspacePath, projectId, taskId, 'human', 'updated', {
-        summary: '已清理隔離 worktree 目錄',
+        summary: '已刪除隔離 worktree',
+      });
+      return { frontmatter: fm, body };
+    },
+    'human',
+  );
+
+  return getTask(projectId, taskId);
+}
+
+function worktreeStillActive(
+  gitRoot: string,
+  task: ReturnType<typeof getTask>,
+): boolean {
+  if (!task.worktree_path) return false;
+  if (task.isolation_status === 'removed') return false;
+  return worktreePathExists(gitRoot, task.worktree_path);
+}
+
+export function getTaskGitStatus(projectId: string, taskId: string): TaskGitStatus {
+  const project = getProject(projectId);
+  const task = getTask(projectId, taskId);
+  const branch = task.git_branch ?? null;
+  const worktreePath = task.worktree_path ?? null;
+  const mergedIntoRecord = (task.merged_into as string | null | undefined) ?? null;
+
+  if (!project.gitRoot) {
+    return {
+      available: false,
+      branch,
+      branch_exists: false,
+      worktree_path: worktreePath,
+      worktree_exists: false,
+      worktree_dirty: false,
+      workspace_dirty: false,
+      default_merge_target: null,
+      merge_targets: [],
+      merged_into: [],
+      merged_into_record: mergedIntoRecord,
+      can_merge: false,
+      can_remove_worktree: false,
+      can_delete_branch: false,
+      can_restore_worktree: false,
+      merge_block_reason: '此專案未偵測到 git 倉庫',
+      remove_worktree_block_reason: '此專案未偵測到 git 倉庫',
+      delete_branch_block_reason: '此專案未偵測到 git 倉庫',
+      restore_worktree_block_reason: '此專案未偵測到 git 倉庫',
+    };
+  }
+
+  const gitRoot = project.gitRoot;
+  const branchExists = branch ? localBranchExists(gitRoot, branch) : false;
+  const worktreeExists = worktreeStillActive(gitRoot, task);
+  const worktreeDirty = worktreePath ? getWorktreeDirty(worktreePath) : false;
+  const workspaceDirty = hasUncommittedChanges(gitRoot);
+  const defaultTarget = resolveDefaultMergeTarget(gitRoot);
+  const mergeTargets = listLocalBranches(gitRoot)
+    .filter((b) => b.name !== branch && !b.worktreePath)
+    .map((b) => b.name);
+
+  const checkTargets = branch
+    ? collectMergeCheckTargets(gitRoot, mergedIntoRecord ?? defaultTarget)
+    : [];
+  const mergedInto = checkTargets.map((target) => ({
+    branch: target,
+    merged: branch ? isBranchMergedInto(gitRoot, branch, target) : false,
+  }));
+
+  let canMerge = false;
+  let mergeBlockReason: string | null = null;
+  if (task.status !== 'done') {
+    mergeBlockReason = '僅完成狀態的任務可 merge';
+  } else if (!branch) {
+    mergeBlockReason = '此任務沒有關聯分支';
+  } else if (!branchExists) {
+    mergeBlockReason = '任務分支已不存在';
+  } else if (workspaceDirty) {
+    mergeBlockReason = '主 workspace 有未提交變更';
+  } else if (mergeTargets.length === 0) {
+    mergeBlockReason = '沒有可 merge 的目標分支';
+  } else {
+    canMerge = true;
+  }
+
+  let canRemoveWorktree = false;
+  let removeWorktreeBlockReason: string | null = null;
+  if (!task.humanReviewed) {
+    removeWorktreeBlockReason = '請先驗收通過';
+  } else if (!worktreePath) {
+    removeWorktreeBlockReason = '沒有 worktree 可刪除';
+  } else if (!worktreeExists && task.isolation_status === 'removed') {
+    removeWorktreeBlockReason = 'worktree 已刪除';
+  } else if (!worktreeExists) {
+    removeWorktreeBlockReason = 'worktree 目錄不存在';
+  } else {
+    canRemoveWorktree = true;
+  }
+
+  let canDeleteBranch = false;
+  let deleteBranchBlockReason: string | null = null;
+  if (!task.humanReviewed) {
+    deleteBranchBlockReason = '請先驗收通過';
+  } else if (!branch) {
+    deleteBranchBlockReason = '沒有分支可刪除';
+  } else if (!branchExists) {
+    deleteBranchBlockReason = '分支已不存在';
+  } else if (worktreeExists) {
+    deleteBranchBlockReason = '請先刪除 worktree';
+  } else if (mergedInto.every((m) => !m.merged)) {
+    const targets = checkTargets.join('、') || 'main/master';
+    deleteBranchBlockReason = `分支尚未合入 ${targets}`;
+  } else {
+    canDeleteBranch = true;
+  }
+
+  let canRestoreWorktree = false;
+  let restoreWorktreeBlockReason: string | null = null;
+  if (!branch) {
+    restoreWorktreeBlockReason = '此任務沒有關聯分支';
+  } else if (!branchExists) {
+    restoreWorktreeBlockReason = '任務分支已不存在，無法恢復';
+  } else if (worktreeExists) {
+    restoreWorktreeBlockReason = 'worktree 仍在使用中';
+  } else {
+    const branchInfo = listLocalBranches(gitRoot).find((b) => b.name === branch);
+    if (branchInfo?.worktreePath) {
+      restoreWorktreeBlockReason = `分支已在其他 worktree 中：${branchInfo.worktreePath}`;
+    } else if (branchInfo?.checkedOutHere) {
+      restoreWorktreeBlockReason = '分支目前在主 workspace checkout，請先切換分支';
+    } else {
+      canRestoreWorktree = true;
+    }
+  }
+
+  return {
+    available: true,
+    branch,
+    branch_exists: branchExists,
+    worktree_path: worktreePath,
+    worktree_exists: worktreeExists,
+    worktree_dirty: worktreeDirty,
+    workspace_dirty: workspaceDirty,
+    default_merge_target: defaultTarget,
+    merge_targets: mergeTargets,
+    merged_into: mergedInto,
+    merged_into_record: mergedIntoRecord,
+    can_merge: canMerge,
+    can_remove_worktree: canRemoveWorktree,
+    can_delete_branch: canDeleteBranch,
+    can_restore_worktree: canRestoreWorktree,
+    merge_block_reason: mergeBlockReason,
+    remove_worktree_block_reason: removeWorktreeBlockReason,
+    delete_branch_block_reason: deleteBranchBlockReason,
+    restore_worktree_block_reason: restoreWorktreeBlockReason,
+  };
+}
+
+export function mergeTaskBranch(
+  projectId: string,
+  taskId: string,
+  targetBranch: string,
+) {
+  const project = getProject(projectId);
+  const task = getTask(projectId, taskId);
+
+  if (!project.gitRoot) {
+    throw new ValidationError('此專案未偵測到 git 倉庫');
+  }
+  if (task.status !== 'done') {
+    throw new ValidationError('僅完成狀態的任務可 merge');
+  }
+  if (!task.git_branch) {
+    throw new ValidationError('此任務沒有關聯分支');
+  }
+  if (!localBranchExists(project.gitRoot, task.git_branch)) {
+    throw new ValidationError(`任務分支不存在：${task.git_branch}`);
+  }
+
+  const status = getTaskGitStatus(projectId, taskId);
+  if (!status.merge_targets.includes(targetBranch)) {
+    throw new ValidationError(`無法 merge 到分支：${targetBranch}`);
+  }
+  if (!status.can_merge && status.merge_block_reason) {
+    throw new ValidationError(status.merge_block_reason);
+  }
+  if (isBranchMergedInto(project.gitRoot, task.git_branch, targetBranch)) {
+    throw new AlreadyMergedError(`此任務分支已合入 ${targetBranch}，無需重複 merge`);
+  }
+
+  const result = mergeBranch(project.gitRoot, task.git_branch, targetBranch);
+  if (!result.ok) {
+    if (result.conflicts?.length) {
+      throw new MergeConflictError(result.error, result.conflicts);
+    }
+    throw new ValidationError(result.error);
+  }
+
+  updateTaskInternal(
+    projectId,
+    taskId,
+    (fm, body) => {
+      fm.merged_into = targetBranch;
+      fm.merged_at = now();
+      logActivity(project.workspacePath, projectId, taskId, 'human', 'updated', {
+        summary: `已 merge ${task.git_branch} → ${targetBranch}`,
+      });
+      return { frontmatter: fm, body };
+    },
+    'human',
+  );
+
+  return getTask(projectId, taskId);
+}
+
+export function deleteTaskBranch(projectId: string, taskId: string) {
+  const project = getProject(projectId);
+  const task = getTask(projectId, taskId);
+
+  if (!project.gitRoot) {
+    throw new ValidationError('此專案未偵測到 git 倉庫');
+  }
+  if (!task.humanReviewed) {
+    throw new ValidationError('請先驗收通過後再刪除分支');
+  }
+  if (!task.git_branch) {
+    throw new ValidationError('此任務沒有關聯分支');
+  }
+
+  const status = getTaskGitStatus(projectId, taskId);
+  if (!status.can_delete_branch && status.delete_branch_block_reason) {
+    throw new ValidationError(status.delete_branch_block_reason);
+  }
+
+  const branchName = task.git_branch;
+  const deletion = deleteLocalBranch(project.gitRoot, branchName);
+  if (!deletion.ok) {
+    throw new ValidationError(deletion.error);
+  }
+
+  updateTaskInternal(
+    projectId,
+    taskId,
+    (fm, body) => {
+      logActivity(project.workspacePath, projectId, taskId, 'human', 'updated', {
+        summary: `已刪除分支 ${branchName}`,
+      });
+      fm.git_branch = null;
+      return { frontmatter: fm, body };
+    },
+    'human',
+  );
+
+  return getTask(projectId, taskId);
+}
+
+export function restoreTaskWorktree(projectId: string, taskId: string) {
+  const project = getProject(projectId);
+  const task = getTask(projectId, taskId);
+
+  if (!project.gitRoot) {
+    throw new ValidationError('此專案未偵測到 git 倉庫');
+  }
+  if (!task.git_branch) {
+    throw new ValidationError('此任務沒有關聯分支');
+  }
+
+  const status = getTaskGitStatus(projectId, taskId);
+  if (!status.can_restore_worktree && status.restore_worktree_block_reason) {
+    throw new ValidationError(status.restore_worktree_block_reason);
+  }
+
+  const isolation = ensureTaskWorktree(project.gitRoot, projectId, taskId, {
+    git_branch: task.git_branch,
+    worktree_path: null,
+    isolation_status: 'removed',
+    isolation_base_sha: task.isolation_base_sha,
+  });
+
+  if (isolation.isolation_status === 'failed') {
+    throw new ValidationError(isolation.isolation_error ?? '無法恢復 worktree');
+  }
+
+  updateTaskInternal(
+    projectId,
+    taskId,
+    (fm, body) => {
+      fm.git_branch = isolation.git_branch;
+      fm.worktree_path = isolation.worktree_path;
+      fm.isolation_base_sha = isolation.isolation_base_sha;
+      fm.isolation_status = 'ready';
+      fm.isolation_error = null;
+      logActivity(project.workspacePath, projectId, taskId, 'human', 'updated', {
+        summary: `已恢復隔離 worktree：${isolation.git_branch}`,
       });
       return { frontmatter: fm, body };
     },

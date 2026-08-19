@@ -46,9 +46,10 @@ After `GET /api/v1/tasks/{id}`, check:
 
 ### Git commits
 
-- Commit only on the task branch (`git_branch`, e.g. `pm-ai/TASK-0001`)
+- Commit only on the task branch (`git_branch`, e.g. `pm-ai/TASK-0001`) **inside the worktree before calling complete**
+- Uncommitted worktree changes are **not** included when the human merges via PM-AI UI
 - **Do not** stage or commit `.pm-ai/` — task files are managed via API in the main workspace
-- PM-AI does **not** auto-commit or merge; the human merges after review
+- PM-AI does **not** auto-commit or merge; the human merges from the task detail page after review (or before approving)
 
 ### Before complete
 

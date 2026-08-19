@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { Toaster } from 'sonner';
 import { Layout } from './components/Layout';
 import { ProjectListPage } from './pages/ProjectListPage';
 import { ProjectDashboardPage } from './pages/ProjectDashboardPage';
@@ -12,6 +13,7 @@ import 'react-diff-view/style/index.css';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
+    <Toaster richColors closeButton position="top-center" duration={5000} />
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Layout />}>

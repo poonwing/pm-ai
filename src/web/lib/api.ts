@@ -46,8 +46,16 @@ export async function api<T>(
     const err = (await res.json().catch(() => ({ error: res.statusText }))) as {
       error: string;
       code?: string;
+      conflicts?: string[];
     };
-    throw new Error(err.error || `HTTP ${res.status}`);
+    const message = err.error || `HTTP ${res.status}`;
+    const apiErr = new Error(message) as Error & {
+      code?: string;
+      conflicts?: string[];
+    };
+    if (err.code) apiErr.code = err.code;
+    if (err.conflicts) apiErr.conflicts = err.conflicts;
+    throw apiErr;
   }
 
   if (res.status === 204) return undefined as T;
@@ -146,7 +154,36 @@ export interface Task {
   execution_path?: string;
   workspace_path?: string;
   use_isolation?: boolean;
+  merged_into?: string | null;
+  merged_at?: string | null;
   preview?: PreviewInfo;
+}
+
+export interface TaskGitMergedStatus {
+  branch: string;
+  merged: boolean;
+}
+
+export interface TaskGitStatus {
+  available: boolean;
+  branch: string | null;
+  branch_exists: boolean;
+  worktree_path: string | null;
+  worktree_exists: boolean;
+  worktree_dirty: boolean;
+  workspace_dirty: boolean;
+  default_merge_target: string | null;
+  merge_targets: string[];
+  merged_into: TaskGitMergedStatus[];
+  merged_into_record: string | null;
+  can_merge: boolean;
+  can_remove_worktree: boolean;
+  can_delete_branch: boolean;
+  can_restore_worktree: boolean;
+  merge_block_reason: string | null;
+  remove_worktree_block_reason: string | null;
+  delete_branch_block_reason: string | null;
+  restore_worktree_block_reason: string | null;
 }
 
 export interface TaskComment {
@@ -318,6 +355,19 @@ export const tasksApi = {
     api<Task>(`/tasks/${taskId}/isolation/retry?project_id=${projectId}`, { method: 'POST' }),
   removeIsolation: (projectId: string, taskId: string) =>
     api<Task>(`/tasks/${taskId}/isolation/remove?project_id=${projectId}`, { method: 'POST' }),
+  getGitStatus: (projectId: string, taskId: string) =>
+    api<TaskGitStatus>(`/tasks/${taskId}/git?project_id=${projectId}`),
+  mergeBranch: (projectId: string, taskId: string, targetBranch: string) =>
+    api<Task>(`/tasks/${taskId}/git/merge?project_id=${projectId}`, {
+      method: 'POST',
+      body: JSON.stringify({ target_branch: targetBranch }),
+    }),
+  removeWorktree: (projectId: string, taskId: string) =>
+    api<Task>(`/tasks/${taskId}/git/remove-worktree?project_id=${projectId}`, { method: 'POST' }),
+  deleteBranch: (projectId: string, taskId: string) =>
+    api<Task>(`/tasks/${taskId}/git/delete-branch?project_id=${projectId}`, { method: 'POST' }),
+  restoreWorktree: (projectId: string, taskId: string) =>
+    api<Task>(`/tasks/${taskId}/git/restore-worktree?project_id=${projectId}`, { method: 'POST' }),
   openInCursor: (projectId: string, taskId: string) =>
     api<{ opened: string }>(`/tasks/${taskId}/isolation/open-cursor?project_id=${projectId}`, {
       method: 'POST',

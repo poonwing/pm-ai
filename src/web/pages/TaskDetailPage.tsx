@@ -1,7 +1,8 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import { Diff, Hunk, parseDiff } from 'react-diff-view';
-import { tasksApi, projectsApi, Task, Project, TaskChangesSummary, FileDiffResponse } from '../lib/api';
+import { tasksApi, projectsApi, Task, Project, TaskChangesSummary, FileDiffResponse, TaskGitStatus } from '../lib/api';
 import { Button, Badge, Input, Textarea, Label, Dialog } from '../components/ui';
 import { formatRelativeTime, statusLabel, statusColor } from '../lib/utils';
 
@@ -347,6 +348,7 @@ export function TaskDetailPage() {
             projectId={projectId!}
             actionLoading={actionLoading}
             onAction={doAction}
+            onRefresh={load}
           />
 
           <PreviewPanel
@@ -828,11 +830,13 @@ function IsolationPanel({
   projectId,
   actionLoading,
   onAction,
+  onRefresh,
 }: {
   task: Task;
   projectId: string;
   actionLoading: string;
   onAction: (action: string, fn: () => Promise<Task>) => void;
+  onRefresh: () => Promise<void>;
 }) {
   const showPanel =
     task.use_isolation ||
@@ -840,14 +844,50 @@ function IsolationPanel({
     !!task.git_branch ||
     !!task.worktree_path;
 
+  const [gitStatus, setGitStatus] = useState<TaskGitStatus | null>(null);
+  const [mergeTarget, setMergeTarget] = useState('');
+  const [mergeConflicts, setMergeConflicts] = useState<string[]>([]);
+  const [mergeError, setMergeError] = useState('');
+  const [confirmRemoveWorktree, setConfirmRemoveWorktree] = useState(false);
+  const [confirmDeleteBranch, setConfirmDeleteBranch] = useState(false);
+  const [confirmRestoreWorktree, setConfirmRestoreWorktree] = useState(false);
+  const [localLoading, setLocalLoading] = useState('');
+
+  const pendingReview = isPendingReview(task);
+  const reviewed = task.status === 'done' && task.humanReviewed;
+  const showGitOps = task.status === 'done' && !!task.git_branch;
+  const showGitStatus = !!task.git_branch;
+
+  const loadGitStatus = useCallback(async () => {
+    if (!showGitStatus) {
+      setGitStatus(null);
+      return;
+    }
+    try {
+      const status = await tasksApi.getGitStatus(projectId, task.id);
+      setGitStatus(status);
+      setMergeTarget((prev) => {
+        if (prev && status.merge_targets.includes(prev)) return prev;
+        if (status.default_merge_target && status.merge_targets.includes(status.default_merge_target)) {
+          return status.default_merge_target;
+        }
+        return status.merge_targets[0] ?? '';
+      });
+    } catch {
+      setGitStatus(null);
+    }
+  }, [projectId, task.id, showGitStatus]);
+
+  useEffect(() => {
+    void loadGitStatus();
+  }, [loadGitStatus, task.version, task.isolation_status, task.git_branch, task.humanReviewed]);
+
   if (!showPanel) return null;
 
   const isReady = task.isolation_status === 'ready';
   const isFailed = task.isolation_status === 'failed';
   const isRemoved = task.isolation_status === 'removed';
   const canManage = task.status === 'todo' || task.status === 'in_progress';
-  const canCleanup =
-    !!task.worktree_path && (isReady || isFailed || isRemoved || task.status === 'done');
 
   const copyPath = async (value: string) => {
     try {
@@ -856,6 +896,54 @@ function IsolationPanel({
       // ignore
     }
   };
+
+  const handleMerge = async () => {
+    if (!mergeTarget) return;
+
+    const alreadyMerged = gitStatus?.merged_into.some(
+      (m) => m.branch === mergeTarget && m.merged,
+    );
+    if (alreadyMerged) {
+      toast.info(`此任務已合入 ${mergeTarget}，無需重複 merge`);
+      return;
+    }
+
+    setMergeError('');
+    setMergeConflicts([]);
+    setLocalLoading('merge');
+    try {
+      await tasksApi.mergeBranch(projectId, task.id, mergeTarget);
+      toast.success(`已成功 merge 到 ${mergeTarget}`);
+      await onRefresh();
+      await loadGitStatus();
+    } catch (err) {
+      const e = err as Error & { code?: string; conflicts?: string[] };
+      if (e.code === 'ALREADY_MERGED') {
+        toast.info(e.message);
+      } else if (e.code === 'MERGE_CONFLICT') {
+        toast.error('Merge 發生衝突，請到主 workspace 手動解決');
+        setMergeConflicts(e.conflicts ?? []);
+      } else {
+        toast.error(e.message);
+      }
+      setMergeError(e.message);
+    } finally {
+      setLocalLoading('');
+    }
+  };
+
+  const loading = actionLoading || localLoading;
+
+  const primaryMergeTarget =
+    gitStatus?.merged_into_record ??
+    gitStatus?.default_merge_target ??
+    mergeTarget;
+  const mergedBadge = primaryMergeTarget
+    ? gitStatus?.merged_into.find((m) => m.branch === primaryMergeTarget)
+    : undefined;
+  const targetAlreadyMerged = gitStatus?.merged_into.some(
+    (m) => m.branch === mergeTarget && m.merged,
+  );
 
   return (
     <section className="rounded-lg border border-border p-4">
@@ -866,7 +954,7 @@ function IsolationPanel({
           <dd>
             {isReady && <span className="text-green-700">worktree 就緒</span>}
             {isFailed && <span className="text-red-600">建立失敗</span>}
-            {isRemoved && <span className="text-muted-foreground">已清理</span>}
+            {isRemoved && <span className="text-muted-foreground">worktree 已刪除</span>}
             {task.isolation_status === 'none' && (
               <span className="text-muted-foreground">
                 {task.use_isolation ? '尚未建立（交給 Agent 時建立）' : '未啟用'}
@@ -880,7 +968,25 @@ function IsolationPanel({
             <dd className="font-mono text-right break-all">{task.git_branch}</dd>
           </div>
         )}
-        {task.worktree_path && (
+        {gitStatus && primaryMergeTarget && (
+          <div className="flex justify-between gap-2">
+            <dt className="text-muted-foreground shrink-0">合併狀態</dt>
+            <dd>
+              {mergedBadge?.merged ? (
+                <span className="text-green-700">已合入 {mergedBadge.branch}</span>
+              ) : (
+                <span className="text-amber-600">尚未合入 {primaryMergeTarget}</span>
+              )}
+            </dd>
+          </div>
+        )}
+        {task.merged_into && (
+          <div className="flex justify-between gap-2">
+            <dt className="text-muted-foreground shrink-0">已 merge 至</dt>
+            <dd className="font-mono text-right">{task.merged_into}</dd>
+          </div>
+        )}
+        {task.worktree_path && !isRemoved && (
           <div className="flex flex-col gap-1">
             <dt className="text-muted-foreground">Worktree</dt>
             <dd className="font-mono text-[11px] break-all">{task.worktree_path}</dd>
@@ -906,17 +1012,80 @@ function IsolationPanel({
         <p className="text-xs text-red-600 mb-3 whitespace-pre-wrap">{task.isolation_error}</p>
       )}
 
-      {isPendingReview(task) && task.git_branch && (
-        <p className="text-xs text-muted-foreground mb-3">
-          驗收通過後，可在主 workspace 執行：
-          <code className="block mt-1 font-mono bg-muted rounded px-2 py-1">
-            git merge {task.git_branch}
-          </code>
-        </p>
+      {task.status === 'done' && gitStatus && gitStatus.branch_exists && (
+        <div className="mb-3 space-y-2">
+          {gitStatus.worktree_dirty && (
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+              worktree 有未提交改動，merge 只會包含已 commit 的內容。請在 worktree 內先 commit。
+            </p>
+          )}
+          {gitStatus.workspace_dirty && (
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+              主 workspace 有未提交變更，請先 commit 或 stash 後再 merge。
+            </p>
+          )}
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+            <div className="flex-1">
+              <Label className="text-xs">Merge 目標分支</Label>
+              <select
+                className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs font-mono"
+                value={mergeTarget}
+                onChange={(e) => setMergeTarget(e.target.value)}
+                disabled={gitStatus.merge_targets.length === 0}
+              >
+                {gitStatus.merge_targets.length === 0 && (
+                  <option value="">無可用分支</option>
+                )}
+                {gitStatus.merge_targets.map((b) => (
+                  <option key={b} value={b}>
+                    {b}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <Button
+              size="sm"
+              onClick={() => void handleMerge()}
+              disabled={
+                !gitStatus.can_merge ||
+                !mergeTarget ||
+                loading === 'merge' ||
+                targetAlreadyMerged
+              }
+            >
+              {loading === 'merge'
+                ? '合併中…'
+                : targetAlreadyMerged
+                  ? `已合入 ${mergeTarget}`
+                  : `Merge 到 ${mergeTarget || '…'}`}
+            </Button>
+          </div>
+          {targetAlreadyMerged && (
+            <p className="text-xs text-muted-foreground">
+              此分支已合入 {mergeTarget}，無需重複 merge。
+            </p>
+          )}
+          {!gitStatus.can_merge && gitStatus.merge_block_reason && (
+            <p className="text-xs text-muted-foreground">{gitStatus.merge_block_reason}</p>
+          )}
+          {mergeError && (
+            <div className="text-xs text-red-600 space-y-1">
+              <p>{mergeError}</p>
+              {mergeConflicts.length > 0 && (
+                <ul className="list-disc pl-4 font-mono">
+                  {mergeConflicts.map((f) => (
+                    <li key={f}>{f}</li>
+                  ))}
+                </ul>
+              )}
+              <p className="text-muted-foreground">請到主 workspace 手動解決衝突後再試。</p>
+            </div>
+          )}
+        </div>
       )}
 
       <div className="flex flex-col gap-2">
-        {isReady && task.execution_path && (
+        {isReady && task.execution_path && (canManage || pendingReview) && (
           <>
             <Button
               size="sm"
@@ -924,7 +1093,7 @@ function IsolationPanel({
               onClick={() =>
                 onAction('open-cursor', () => tasksApi.openInCursor(projectId, task.id).then(() => task))
               }
-              disabled={actionLoading === 'open-cursor'}
+              disabled={loading === 'open-cursor'}
             >
               用 Cursor 開啟
             </Button>
@@ -944,30 +1113,132 @@ function IsolationPanel({
             onClick={() =>
               onAction('retry-isolation', () => tasksApi.retryIsolation(projectId, task.id))
             }
-            disabled={actionLoading === 'retry-isolation'}
+            disabled={loading === 'retry-isolation'}
           >
             重試建立 worktree
           </Button>
         )}
-        {canCleanup && task.isolation_status !== 'removed' && (
+        {isFailed && task.worktree_path && !isRemoved && (
           <Button
             size="sm"
             variant="ghost"
             onClick={() =>
-              onAction('remove-isolation', () => tasksApi.removeIsolation(projectId, task.id))
+              onAction('remove-worktree', () => tasksApi.removeWorktree(projectId, task.id))
             }
-            disabled={actionLoading === 'remove-isolation'}
+            disabled={loading === 'remove-worktree'}
           >
-            清理隔離目錄
+            清理失敗的 worktree
           </Button>
+        )}
+        {reviewed && gitStatus?.can_remove_worktree && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setConfirmRemoveWorktree(true)}
+            disabled={loading === 'remove-worktree'}
+          >
+            刪除 worktree
+          </Button>
+        )}
+        {reviewed && gitStatus && !gitStatus.can_remove_worktree && gitStatus.worktree_exists && (
+          <p className="text-xs text-muted-foreground">{gitStatus.remove_worktree_block_reason}</p>
+        )}
+        {gitStatus?.can_restore_worktree && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setConfirmRestoreWorktree(true)}
+            disabled={loading === 'restore-worktree'}
+          >
+            恢復 worktree
+          </Button>
+        )}
+        {gitStatus && !gitStatus.can_restore_worktree && isRemoved && gitStatus.branch_exists && (
+          <p className="text-xs text-muted-foreground">{gitStatus.restore_worktree_block_reason}</p>
+        )}
+        {reviewed && gitStatus?.can_delete_branch && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setConfirmDeleteBranch(true)}
+            disabled={loading === 'delete-branch'}
+          >
+            刪除 branch
+          </Button>
+        )}
+        {reviewed && gitStatus && gitStatus.branch_exists && !gitStatus.can_delete_branch && (
+          <p className="text-xs text-muted-foreground">{gitStatus.delete_branch_block_reason}</p>
         )}
       </div>
 
-      {isReady && (task.status === 'todo' || task.status === 'in_progress') && (
+      {isReady && canManage && (
         <p className="text-xs text-muted-foreground mt-3">
           請在 worktree 目錄開啟 Cursor 後再讓 Agent 認領，避免多任務同時改主目錄。
         </p>
       )}
+
+      <Dialog open={confirmRemoveWorktree} onClose={() => setConfirmRemoveWorktree(false)} title="刪除 worktree">
+        <p className="text-sm text-muted-foreground mb-4">
+          將移除任務的隔離 worktree 目錄。未 commit 的改動會一併丟失，請確認已 merge 或 commit。
+        </p>
+        <div className="flex gap-2 justify-end">
+          <Button variant="ghost" onClick={() => setConfirmRemoveWorktree(false)}>
+            取消
+          </Button>
+          <Button
+            variant="destructive"
+            onClick={() => {
+              setConfirmRemoveWorktree(false);
+              onAction('remove-worktree', () => tasksApi.removeWorktree(projectId, task.id));
+            }}
+            disabled={loading === 'remove-worktree'}
+          >
+            確認刪除
+          </Button>
+        </div>
+      </Dialog>
+
+      <Dialog open={confirmDeleteBranch} onClose={() => setConfirmDeleteBranch(false)} title="刪除 branch">
+        <p className="text-sm text-muted-foreground mb-4">
+          將刪除本地分支 <code className="font-mono">{task.git_branch}</code>。此操作不可復原。
+        </p>
+        <div className="flex gap-2 justify-end">
+          <Button variant="ghost" onClick={() => setConfirmDeleteBranch(false)}>
+            取消
+          </Button>
+          <Button
+            variant="destructive"
+            onClick={() => {
+              setConfirmDeleteBranch(false);
+              onAction('delete-branch', () => tasksApi.deleteBranch(projectId, task.id));
+            }}
+            disabled={loading === 'delete-branch'}
+          >
+            確認刪除
+          </Button>
+        </div>
+      </Dialog>
+
+      <Dialog open={confirmRestoreWorktree} onClose={() => setConfirmRestoreWorktree(false)} title="恢復 worktree">
+        <p className="text-sm text-muted-foreground mb-4">
+          將從分支 <code className="font-mono">{task.git_branch}</code> 重新建立隔離 worktree。
+          僅能恢復<strong>已 commit</strong> 的內容；刪除前未 commit 的改動無法找回。
+        </p>
+        <div className="flex gap-2 justify-end">
+          <Button variant="ghost" onClick={() => setConfirmRestoreWorktree(false)}>
+            取消
+          </Button>
+          <Button
+            onClick={() => {
+              setConfirmRestoreWorktree(false);
+              onAction('restore-worktree', () => tasksApi.restoreWorktree(projectId, task.id));
+            }}
+            disabled={loading === 'restore-worktree'}
+          >
+            確認恢復
+          </Button>
+        </div>
+      </Dialog>
     </section>
   );
 }

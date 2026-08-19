@@ -25,6 +25,7 @@ import {
   CancelTaskSchema,
   CreateCommentSchema,
   CheckoutBranchSchema,
+  MergeTaskBranchSchema,
   TASK_STATUSES,
   STATUS_LABELS,
   PORT,
@@ -41,6 +42,8 @@ import {
   NotFoundError,
   ForbiddenError,
   ValidationError,
+  MergeConflictError,
+  AlreadyMergedError,
 } from './services/tasks.js';
 
 type Variables = {
@@ -79,6 +82,15 @@ function errorResponse(c: Context, err: unknown) {
   }
   if (err instanceof ForbiddenError) {
     return c.json({ error: err.message, code: 'FORBIDDEN' }, 403);
+  }
+  if (err instanceof MergeConflictError) {
+    return c.json(
+      { error: err.message, code: 'MERGE_CONFLICT', conflicts: err.conflicts },
+      409,
+    );
+  }
+  if (err instanceof AlreadyMergedError) {
+    return c.json({ error: err.message, code: 'ALREADY_MERGED' }, 400);
   }
   if (err instanceof ValidationError) {
     return c.json({ error: err.message, code: 'VALIDATION' }, 400);
@@ -419,6 +431,64 @@ app.post('/api/v1/tasks/:id/isolation/remove', authMiddleware('human'), (c) => {
     const projectId = c.req.query('project_id');
     if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
     return c.json(taskService.removeTaskIsolation(projectId, requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.get('/api/v1/tasks/:id/git', authMiddleware('human'), (c) => {
+  try {
+    const projectId = c.req.query('project_id');
+    if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
+    return c.json(taskService.getTaskGitStatus(projectId, requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post(
+  '/api/v1/tasks/:id/git/merge',
+  authMiddleware('human'),
+  zValidator('json', MergeTaskBranchSchema),
+  (c) => {
+    try {
+      const projectId = c.req.query('project_id');
+      if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
+      const body = c.req.valid('json');
+      return c.json(
+        taskService.mergeTaskBranch(projectId, requireParam(c, 'id'), body.target_branch),
+      );
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  },
+);
+
+app.post('/api/v1/tasks/:id/git/remove-worktree', authMiddleware('human'), (c) => {
+  try {
+    const projectId = c.req.query('project_id');
+    if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
+    return c.json(taskService.removeTaskIsolation(projectId, requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post('/api/v1/tasks/:id/git/delete-branch', authMiddleware('human'), (c) => {
+  try {
+    const projectId = c.req.query('project_id');
+    if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
+    return c.json(taskService.deleteTaskBranch(projectId, requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post('/api/v1/tasks/:id/git/restore-worktree', authMiddleware('human'), (c) => {
+  try {
+    const projectId = c.req.query('project_id');
+    if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
+    return c.json(taskService.restoreTaskWorktree(projectId, requireParam(c, 'id')));
   } catch (err) {
     return errorResponse(c, err);
   }

@@ -83,6 +83,8 @@ export const TaskFrontmatterSchema = z.object({
   isolation_status: z.enum(ISOLATION_STATUSES).optional().default('none'),
   isolation_error: z.string().nullable().optional().default(null),
   use_isolation: z.boolean().optional().default(false),
+  merged_into: z.string().nullable().optional().default(null),
+  merged_at: z.string().nullable().optional().default(null),
 });
 
 export type TaskFrontmatter = z.infer<typeof TaskFrontmatterSchema>;
@@ -281,6 +283,50 @@ export const WorkspaceGitStatusSchema = z.object({
 });
 
 export type WorkspaceGitStatus = z.infer<typeof WorkspaceGitStatusSchema>;
+
+export const MergeTaskBranchSchema = z.object({
+  target_branch: z.string().min(1),
+});
+
+export const TaskGitMergedStatusSchema = z.object({
+  branch: z.string(),
+  merged: z.boolean(),
+});
+
+export const TaskGitStatusSchema = z.object({
+  available: z.boolean(),
+  branch: z.string().nullable(),
+  branch_exists: z.boolean(),
+  worktree_path: z.string().nullable(),
+  worktree_exists: z.boolean(),
+  worktree_dirty: z.boolean(),
+  workspace_dirty: z.boolean(),
+  default_merge_target: z.string().nullable(),
+  merge_targets: z.array(z.string()),
+  merged_into: z.array(TaskGitMergedStatusSchema),
+  merged_into_record: z.string().nullable(),
+  can_merge: z.boolean(),
+  can_remove_worktree: z.boolean(),
+  can_delete_branch: z.boolean(),
+  can_restore_worktree: z.boolean(),
+  merge_block_reason: z.string().nullable(),
+  remove_worktree_block_reason: z.string().nullable(),
+  delete_branch_block_reason: z.string().nullable(),
+  restore_worktree_block_reason: z.string().nullable(),
+});
+
+export type TaskGitStatus = z.infer<typeof TaskGitStatusSchema>;
+
+export const MergeTaskBranchResultSchema = z.object({
+  ok: z.boolean(),
+  task: z.unknown().optional(),
+  target_branch: z.string().optional(),
+  source_branch: z.string().optional(),
+  error: z.string().optional(),
+  conflicts: z.array(z.string()).optional(),
+});
+
+export type MergeTaskBranchResult = z.infer<typeof MergeTaskBranchResultSchema>;
 
 export function needsHumanAttention(task: TaskFrontmatter): boolean {
   if (task.status === 'draft') return true;

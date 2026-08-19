@@ -61,7 +61,7 @@ export function resolveBaseSha(gitRoot: string): string {
   throw new Error('無法解析 git base commit');
 }
 
-function branchExists(gitRoot: string, branch: string): boolean {
+export function localBranchExists(gitRoot: string, branch: string): boolean {
   const result = runGit(gitRoot, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]);
   return result.code === 0;
 }
@@ -130,7 +130,7 @@ export function ensureTaskWorktree(
       fs.rmSync(worktreePath, { recursive: true, force: true });
     }
 
-    const addArgs = branchExists(gitRoot, branch)
+    const addArgs = localBranchExists(gitRoot, branch)
       ? ['worktree', 'add', worktreePath, branch]
       : ['worktree', 'add', '-b', branch, worktreePath, baseSha];
 
@@ -508,4 +508,138 @@ export function checkoutBranch(
     return { ok: false, error: msg };
   }
   return { ok: true, branch: name };
+}
+
+export function isBranchMergedInto(
+  gitRoot: string,
+  sourceBranch: string,
+  targetBranch: string,
+): boolean {
+  const sourceTip = getBranchTipSha(gitRoot, sourceBranch);
+  const targetTip = getBranchTipSha(gitRoot, targetBranch);
+  if (!sourceTip || !targetTip) return false;
+  const result = runGit(gitRoot, ['merge-base', '--is-ancestor', sourceTip, targetTip]);
+  return result.code === 0;
+}
+
+export function getWorktreeDirty(worktreePath: string): boolean {
+  if (!worktreePath || !fs.existsSync(worktreePath)) return false;
+  return hasUncommittedChanges(worktreePath);
+}
+
+export function worktreePathExists(gitRoot: string, worktreePath: string): boolean {
+  if (!worktreePath) return false;
+  return worktreeRegistered(gitRoot, worktreePath) || fs.existsSync(worktreePath);
+}
+
+function listMergeConflictFiles(gitRoot: string): string[] {
+  const result = runGit(gitRoot, ['diff', '--name-only', '--diff-filter=U']);
+  if (result.code !== 0) return [];
+  return result.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+export type MergeBranchResult =
+  | { ok: true; target: string; source: string }
+  | { ok: false; error: string; conflicts?: string[] };
+
+export function mergeBranch(
+  gitRoot: string,
+  sourceBranch: string,
+  targetBranch: string,
+): MergeBranchResult {
+  const source = assertBranchName(sourceBranch);
+  const target = assertBranchName(targetBranch);
+
+  if (!localBranchExists(gitRoot, source)) {
+    return { ok: false, error: `來源分支不存在：${source}` };
+  }
+  if (!localBranchExists(gitRoot, target)) {
+    return { ok: false, error: `目標分支不存在：${target}` };
+  }
+  if (source === target) {
+    return { ok: false, error: '來源與目標分支相同' };
+  }
+  if (hasUncommittedChanges(gitRoot)) {
+    return { ok: false, error: '主 workspace 有未提交變更，請先 commit 或 stash' };
+  }
+
+  const checkout = checkoutBranch(gitRoot, target);
+  if (!checkout.ok) {
+    return { ok: false, error: checkout.error };
+  }
+
+  const mergeResult = runGit(gitRoot, ['merge', source, '--no-edit']);
+  if (mergeResult.code === 0) {
+    return { ok: true, target, source };
+  }
+
+  const conflicts = listMergeConflictFiles(gitRoot);
+  runGit(gitRoot, ['merge', '--abort']);
+
+  return {
+    ok: false,
+    error: mergeResult.stderr || mergeResult.stdout || 'merge 失敗',
+    conflicts: conflicts.length > 0 ? conflicts : undefined,
+  };
+}
+
+export function deleteLocalBranch(
+  gitRoot: string,
+  branch: string,
+): { ok: true } | { ok: false; error: string } {
+  const name = assertBranchName(branch);
+  if (!localBranchExists(gitRoot, name)) {
+    return { ok: true };
+  }
+
+  const branches = listLocalBranches(gitRoot);
+  const info = branches.find((b) => b.name === name);
+  if (info?.worktreePath) {
+    return {
+      ok: false,
+      error: `分支 ${name} 仍在 worktree 中使用，請先刪除 worktree`,
+    };
+  }
+  if (info?.checkedOutHere) {
+    return {
+      ok: false,
+      error: `分支 ${name} 目前在主 workspace checkout，請先切換到其他分支`,
+    };
+  }
+
+  const result = runGit(gitRoot, ['branch', '-d', name]);
+  if (result.code !== 0) {
+    return { ok: false, error: result.stderr || result.stdout || '無法刪除分支' };
+  }
+  return { ok: true };
+}
+
+export function resolveDefaultMergeTarget(gitRoot: string): string | null {
+  const current = getCurrentBranch(gitRoot);
+  if (current && !current.startsWith('pm-ai/')) return current;
+  for (const branch of ['main', 'master']) {
+    if (localBranchExists(gitRoot, branch)) return branch;
+  }
+  const branches = listLocalBranches(gitRoot);
+  const candidate = branches.find((b) => !b.name.startsWith('pm-ai/') && !b.worktreePath);
+  return candidate?.name ?? null;
+}
+
+export function collectMergeCheckTargets(
+  gitRoot: string,
+  preferredTarget?: string | null,
+): string[] {
+  const targets = new Set<string>();
+  if (preferredTarget && localBranchExists(gitRoot, preferredTarget)) {
+    targets.add(preferredTarget);
+  }
+  const current = getCurrentBranch(gitRoot);
+  if (current) targets.add(current);
+  for (const branch of ['main', 'master']) {
+    if (localBranchExists(gitRoot, branch)) targets.add(branch);
+  }
+  return [...targets];
 }
