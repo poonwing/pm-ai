@@ -409,3 +409,103 @@ export function assertRepoRelativePath(filePath: string): string {
   }
   return normalized;
 }
+
+export interface LocalBranchInfo {
+  name: string;
+  worktreePath: string | null;
+  checkedOutHere: boolean;
+}
+
+function parseWorktreeBranches(gitRoot: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const list = runGit(gitRoot, ['worktree', 'list', '--porcelain']);
+  if (list.code !== 0) return map;
+
+  let currentWorktree = '';
+  for (const line of list.stdout.split('\n')) {
+    if (line.startsWith('worktree ')) {
+      currentWorktree = path.resolve(line.slice('worktree '.length));
+      continue;
+    }
+    if (line.startsWith('branch ') && currentWorktree) {
+      const ref = line.slice('branch '.length).replace(/^refs\/heads\//, '');
+      map.set(ref, currentWorktree);
+    }
+  }
+  return map;
+}
+
+export function assertBranchName(branch: string): string {
+  const name = branch.trim();
+  if (!name || name.includes('..') || name.startsWith('/') || name.includes('\\')) {
+    throw new Error('無效的分支名稱');
+  }
+  if (name.startsWith('refs/') || name.includes('refs/heads/')) {
+    throw new Error('請使用本地分支短名稱');
+  }
+  return name;
+}
+
+export function getCurrentBranch(gitRoot: string): string | null {
+  const result = runGit(gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (result.code !== 0) return null;
+  if (result.stdout === 'HEAD') return null;
+  return result.stdout;
+}
+
+export function hasUncommittedChanges(gitRoot: string): boolean {
+  const result = runGit(gitRoot, ['status', '--porcelain']);
+  return result.code === 0 && result.stdout.trim().length > 0;
+}
+
+export function listLocalBranches(gitRoot: string): LocalBranchInfo[] {
+  const refs = runGit(gitRoot, ['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
+  if (refs.code !== 0) return [];
+
+  const worktreeByBranch = parseWorktreeBranches(gitRoot);
+  const root = path.resolve(gitRoot);
+
+  return refs.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b))
+    .map((name) => {
+      const wt = worktreeByBranch.get(name) ?? null;
+      const checkedOutHere = wt !== null && path.resolve(wt) === root;
+      const worktreePath =
+        wt !== null && path.resolve(wt) !== root ? wt : null;
+      return { name, worktreePath, checkedOutHere };
+    });
+}
+
+export function checkoutBranch(
+  gitRoot: string,
+  branch: string,
+): { ok: true; branch: string } | { ok: false; error: string } {
+  const name = assertBranchName(branch);
+  const branches = listLocalBranches(gitRoot);
+  const info = branches.find((b) => b.name === name);
+  if (!info) {
+    return { ok: false, error: `本地找不到分支：${name}` };
+  }
+  if (info.worktreePath) {
+    return {
+      ok: false,
+      error: `分支 ${name} 已在 worktree 中使用：${info.worktreePath}`,
+    };
+  }
+  if (info.checkedOutHere) {
+    return { ok: true, branch: name };
+  }
+
+  const result = runGit(gitRoot, ['switch', name]);
+  if (result.code !== 0) {
+    const msg = result.stderr || result.stdout || 'git switch 失敗';
+    if (/already checked out/i.test(msg)) {
+      return { ok: false, error: `分支 ${name} 已在其他 worktree 中 checkout` };
+    }
+    return { ok: false, error: msg };
+  }
+  return { ok: true, branch: name };
+}

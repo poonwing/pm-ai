@@ -261,6 +261,27 @@ export const FileDiffResponseSchema = z.object({
 
 export type FileDiffResponse = z.infer<typeof FileDiffResponseSchema>;
 
+export const CheckoutBranchSchema = z.object({
+  branch: z.string().min(1),
+});
+
+export const WorkspaceGitBranchSchema = z.object({
+  name: z.string(),
+  worktree_path: z.string().nullable(),
+  selectable: z.boolean(),
+  current: z.boolean(),
+});
+
+export const WorkspaceGitStatusSchema = z.object({
+  available: z.boolean(),
+  git_root: z.string().nullable(),
+  current_branch: z.string().nullable(),
+  dirty: z.boolean(),
+  branches: z.array(WorkspaceGitBranchSchema),
+});
+
+export type WorkspaceGitStatus = z.infer<typeof WorkspaceGitStatusSchema>;
+
 export function needsHumanAttention(task: TaskFrontmatter): boolean {
   if (task.status === 'draft') return true;
   if (isPendingReview(task)) return true;

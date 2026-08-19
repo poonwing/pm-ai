@@ -24,6 +24,7 @@ import {
   RejectReviewSchema,
   CancelTaskSchema,
   CreateCommentSchema,
+  CheckoutBranchSchema,
   TASK_STATUSES,
   STATUS_LABELS,
   PORT,
@@ -31,6 +32,10 @@ import {
 import * as taskService from './services/tasks.js';
 import { getTaskChanges, getTaskFileDiff } from './services/changes.js';
 import { stopAllPreviews } from './services/preview.js';
+import {
+  checkoutWorkspaceBranch,
+  getWorkspaceGitStatus,
+} from './services/workspace-git.js';
 import {
   ConflictError,
   NotFoundError,
@@ -234,6 +239,28 @@ app.post('/api/v1/projects/:id/skill/reinstall', authMiddleware('human'), (c) =>
     return errorResponse(c, err);
   }
 });
+
+app.get('/api/v1/projects/:id/git', authMiddleware('human'), (c) => {
+  try {
+    return c.json(getWorkspaceGitStatus(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post(
+  '/api/v1/projects/:id/git/checkout',
+  authMiddleware('human'),
+  zValidator('json', CheckoutBranchSchema),
+  (c) => {
+    try {
+      const body = c.req.valid('json');
+      return c.json(checkoutWorkspaceBranch(requireParam(c, 'id'), body.branch));
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  },
+);
 
 // Tasks - list & create
 app.get('/api/v1/projects/:id/tasks', authMiddleware('any'), (c) => {

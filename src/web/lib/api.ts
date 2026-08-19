@@ -204,6 +204,21 @@ export interface AppConfig {
   token: string;
 }
 
+export interface WorkspaceGitBranch {
+  name: string;
+  worktree_path: string | null;
+  selectable: boolean;
+  current: boolean;
+}
+
+export interface WorkspaceGitStatus {
+  available: boolean;
+  git_root: string | null;
+  current_branch: string | null;
+  dirty: boolean;
+  branches: WorkspaceGitBranch[];
+}
+
 export const projectsApi = {
   list: () => api<Project[]>('/projects'),
   get: (id: string) => api<Project>(`/projects/${id}`),
@@ -233,6 +248,12 @@ export const projectsApi = {
       { method: 'POST' },
     ),
   dashboard: (id: string) => api<Dashboard>(`/projects/${id}/dashboard`),
+  getGit: (id: string) => api<WorkspaceGitStatus>(`/projects/${id}/git`),
+  checkoutBranch: (id: string, branch: string) =>
+    api<WorkspaceGitStatus>(`/projects/${id}/git/checkout`, {
+      method: 'POST',
+      body: JSON.stringify({ branch }),
+    }),
 };
 
 export const tasksApi = {
