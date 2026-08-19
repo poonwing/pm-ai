@@ -1,24 +1,21 @@
-import Database from 'better-sqlite3';
-import { drizzle } from 'drizzle-orm/better-sqlite3';
-import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import * as schema from './schema.js';
 import { getDbPath } from '../paths.js';
+import { drizzle, migrate, openSqlite } from './sqlite.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let _db: ReturnType<typeof drizzle<typeof schema>> | null = null;
 
-function runMigrations(sqlite: Database.Database) {
+function runMigrations(db: ReturnType<typeof drizzle<typeof schema>>) {
   const migrationsFolder = path.join(__dirname, 'migrations');
   if (fs.existsSync(migrationsFolder)) {
-    migrate(drizzle(sqlite, { schema }), { migrationsFolder });
+    migrate(db, { migrationsFolder });
     return;
   }
-  // Inline migration for first run
-  sqlite.exec(`
+  db.$client.exec(`
     CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -81,16 +78,29 @@ function runMigrations(sqlite: Database.Database) {
     );
     CREATE INDEX IF NOT EXISTS idx_comments_task ON comments(task_id, at);
   `);
+  db.$client.exec(`
+    CREATE TABLE IF NOT EXISTS preview_servers (
+      task_uid TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      task_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'stopped',
+      port INTEGER,
+      pid INTEGER,
+      cwd TEXT,
+      command TEXT,
+      log_tail TEXT DEFAULT '[]',
+      error TEXT,
+      started_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+  `);
 }
 
 export function getDb() {
   if (!_db) {
-    const dbPath = getDbPath();
-    const sqlite = new Database(dbPath);
-    sqlite.pragma('journal_mode = WAL');
-    sqlite.pragma('foreign_keys = ON');
-    runMigrations(sqlite);
+    const sqlite = openSqlite(getDbPath());
     _db = drizzle(sqlite, { schema });
+    runMigrations(_db);
   }
   return _db;
 }

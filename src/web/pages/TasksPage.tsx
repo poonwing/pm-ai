@@ -1,21 +1,34 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Link, useParams, useNavigate } from 'react-router-dom';
-import { tasksApi, Task } from '../lib/api';
-import { Button, Badge, Input } from '../components/ui';
+import { Link, useParams, useNavigate, useSearchParams } from 'react-router-dom';
+import { tasksApi, projectsApi, Task, Project } from '../lib/api';
+import { Button, Badge, Input, Textarea, Label, Dialog } from '../components/ui';
 import { formatRelativeTime, statusLabel, statusColor, statusDotColor } from '../lib/utils';
 import { TASK_STATUSES, TaskStatus } from '@shared/schemas';
 
 type ViewMode = 'board' | 'list';
 
+const emptyCreateForm = () => ({
+  title: '',
+  goal: '',
+  acceptance_criteria: '',
+  constraints: '',
+  use_isolation: true,
+});
+
 export function TasksPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [project, setProject] = useState<Project | null>(null);
   const [view, setView] = useState<ViewMode>('board');
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<'all' | 'needs_attention'>('all');
   const [showCancelled, setShowCancelled] = useState(false);
+  const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [createForm, setCreateForm] = useState(emptyCreateForm);
   const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState('');
 
   const load = useCallback(async () => {
     if (!projectId) return;
@@ -28,17 +41,60 @@ export function TasksPage() {
   }, [load]);
 
   useEffect(() => {
+    if (!projectId) return;
+    projectsApi.get(projectId).then(setProject).catch(() => setProject(null));
+  }, [projectId]);
+
+  useEffect(() => {
+    if (searchParams.get('new') === '1') {
+      setShowCreateDialog(true);
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
+
+  useEffect(() => {
     const hasInProgress = tasks.some((t) => t.status === 'in_progress');
     const interval = setInterval(load, hasInProgress ? 3000 : 8000);
     return () => clearInterval(interval);
   }, [load, tasks]);
 
+  const openCreateDialog = async () => {
+    setCreateError('');
+    setShowCreateDialog(true);
+    if (!projectId) return;
+    try {
+      const p = await projectsApi.get(projectId);
+      setProject(p);
+      setCreateForm({
+        ...emptyCreateForm(),
+        use_isolation: !!p.gitRoot,
+      });
+    } catch {
+      setProject(null);
+      setCreateForm(emptyCreateForm());
+    }
+  };
+
   const handleCreate = async () => {
     if (!projectId) return;
+    if (!createForm.title.trim()) {
+      setCreateError('請填寫任務標題');
+      return;
+    }
     setCreating(true);
+    setCreateError('');
     try {
-      const task = await tasksApi.create(projectId, { title: '新任務' });
+      const task = await tasksApi.create(projectId, {
+        title: createForm.title.trim(),
+        goal: createForm.goal.trim() || undefined,
+        acceptance_criteria: createForm.acceptance_criteria.trim() || undefined,
+        constraints: createForm.constraints.trim() || undefined,
+        use_isolation: project?.gitRoot ? createForm.use_isolation : false,
+      });
+      setShowCreateDialog(false);
       navigate(`/projects/${projectId}/tasks/${task.id}`);
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : '建立失敗');
     } finally {
       setCreating(false);
     }
@@ -64,15 +120,17 @@ export function TasksPage() {
     <div className="flex flex-col gap-4 h-full">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-2">
-          <div className="flex rounded-md border border-border overflow-hidden">
+          <div className="inline-flex h-9 w-max min-w-max shrink-0 overflow-hidden rounded-md border border-border">
             <button
-              className={`px-3 py-1.5 text-sm ${view === 'board' ? 'bg-accent font-medium' : 'hover:bg-accent/50'}`}
+              type="button"
+              className={`h-9 min-w-max shrink-0 whitespace-nowrap px-3 text-sm leading-9 ${view === 'board' ? 'bg-accent font-medium' : 'hover:bg-accent/50'}`}
               onClick={() => setView('board')}
             >
               看板
             </button>
             <button
-              className={`px-3 py-1.5 text-sm ${view === 'list' ? 'bg-accent font-medium' : 'hover:bg-accent/50'}`}
+              type="button"
+              className={`h-9 min-w-max shrink-0 whitespace-nowrap border-l border-border px-3 text-sm leading-9 ${view === 'list' ? 'bg-accent font-medium' : 'hover:bg-accent/50'}`}
               onClick={() => setView('list')}
             >
               列表
@@ -93,9 +151,7 @@ export function TasksPage() {
             className="w-40"
           />
         </div>
-        <Button onClick={handleCreate} disabled={creating}>
-          {creating ? '建立中…' : '+ 新增任務'}
-        </Button>
+        <Button onClick={openCreateDialog}>+ 新增任務</Button>
       </div>
 
       {view === 'board' ? (
@@ -171,6 +227,99 @@ export function TasksPage() {
           </table>
         </div>
       )}
+
+      <Dialog open={showCreateDialog} onClose={() => setShowCreateDialog(false)} title="新增任務">
+        <div className="flex flex-col gap-4 max-h-[70vh] overflow-y-auto">
+          <div>
+            <Label htmlFor="create-title">標題 *</Label>
+            <Input
+              id="create-title"
+              value={createForm.title}
+              onChange={(e) => setCreateForm((f) => ({ ...f, title: e.target.value }))}
+              placeholder="任務標題"
+              className="mt-1"
+              autoFocus
+            />
+          </div>
+
+          <section className="rounded-md border border-blue-200 bg-blue-50/50 p-3">
+            <h3 className="text-sm font-semibold text-blue-900 mb-2">Git 隔離（worktree）</h3>
+            <label
+              className={`flex items-start gap-2 text-sm ${project?.gitRoot ? 'cursor-pointer' : 'cursor-not-allowed'}`}
+            >
+              <input
+                type="checkbox"
+                className="mt-1 h-4 w-4"
+                checked={project?.gitRoot ? createForm.use_isolation : false}
+                disabled={!project?.gitRoot}
+                onChange={(e) =>
+                  setCreateForm((f) => ({ ...f, use_isolation: e.target.checked }))
+                }
+              />
+              <span>
+                交給 Agent 時建立獨立 branch 與 worktree
+                <span className="block text-xs text-muted-foreground mt-1">
+                  {project?.gitRoot ? (
+                    <>
+                      已偵測 git：
+                      <code className="font-mono text-[11px] break-all">{project.gitRoot}</code>
+                    </>
+                  ) : project === null ? (
+                    '正在檢查 git 倉庫…'
+                  ) : (
+                    '此 workspace 未偵測到 git 倉庫，無法使用 worktree 隔離'
+                  )}
+                </span>
+              </span>
+            </label>
+          </section>
+
+          <div>
+            <Label htmlFor="create-goal">目標</Label>
+            <Textarea
+              id="create-goal"
+              value={createForm.goal}
+              onChange={(e) => setCreateForm((f) => ({ ...f, goal: e.target.value }))}
+              placeholder="想達成什麼"
+              rows={2}
+              className="mt-1"
+            />
+          </div>
+          <div>
+            <Label htmlFor="create-ac">驗收標準</Label>
+            <Textarea
+              id="create-ac"
+              value={createForm.acceptance_criteria}
+              onChange={(e) => setCreateForm((f) => ({ ...f, acceptance_criteria: e.target.value }))}
+              placeholder="交給 Agent 前必填；可先留空，之後在詳情頁補上"
+              rows={3}
+              className="mt-1"
+            />
+          </div>
+          <div>
+            <Label htmlFor="create-constraints">約束與範圍</Label>
+            <Textarea
+              id="create-constraints"
+              value={createForm.constraints}
+              onChange={(e) => setCreateForm((f) => ({ ...f, constraints: e.target.value }))}
+              placeholder="不要動哪些檔案、技術限制等"
+              rows={2}
+              className="mt-1"
+            />
+          </div>
+          {createError && (
+            <p className="text-sm text-red-600">{createError}</p>
+          )}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="outline" onClick={() => setShowCreateDialog(false)}>
+              取消
+            </Button>
+            <Button onClick={handleCreate} disabled={creating || !createForm.title.trim()}>
+              {creating ? '建立中…' : '確認新建'}
+            </Button>
+          </div>
+        </div>
+      </Dialog>
     </div>
   );
 }

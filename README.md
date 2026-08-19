@@ -4,7 +4,10 @@
 
 ## 快速開始
 
+需要 **Node.js 22.13 或更新**（22 LTS、24 都可以）。用 Node 内置 sqlite，安装时不需要 Visual Studio / Python。
+
 ```bash
+node -v
 npm install
 npm run dev
 ```
@@ -34,12 +37,12 @@ npm start
 1. 開啟 UI，建立專案並綁定本機資料夾
 2. 建立任務（草稿），填寫標題和驗收標準
 3. 點「交給 Agent」，任務進入待處理佇列
-4. 在本機 Cursor 中使用 [`skill/SKILL.md`](skill/SKILL.md) 讓 Agent 認領並完成任務
+4. 在本機 Cursor 開啟該 workspace（已自動安裝 `.cursor/skills/pm-ai-agent/SKILL.md`），讓 Agent 認領並完成任務
 5. 回到 UI 驗收或打回
 
 ## Agent 對接
 
-詳見 [`skill/SKILL.md`](skill/SKILL.md)。
+詳見 [`skill/SKILL.md`](skill/SKILL.md)。新建專案時會自動複製到綁定 workspace 的 `.cursor/skills/pm-ai-agent/SKILL.md`。
 
 Agent 可以：建立任務、認領待處理、寫進度、完成、釋放、評論。
 Agent 不能：發布草稿、取消、驗收。

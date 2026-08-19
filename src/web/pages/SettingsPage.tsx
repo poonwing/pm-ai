@@ -17,6 +17,11 @@ export function ProjectSettingsPage() {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [picking, setPicking] = useState(false);
+  const [skillLoading, setSkillLoading] = useState(false);
+  const [previewCommand, setPreviewCommand] = useState('npm run dev');
+  const [previewInstallCommand, setPreviewInstallCommand] = useState('npm install');
+  const [previewInstallIfNeeded, setPreviewInstallIfNeeded] = useState(true);
+  const [previewWorkdir, setPreviewWorkdir] = useState('');
 
   useEffect(() => {
     if (!projectId) return;
@@ -25,13 +30,24 @@ export function ProjectSettingsPage() {
       setName(p.name);
       setDescription(p.description);
       setNewPath(p.workspacePath);
+      setPreviewCommand(p.previewCommand ?? 'npm run dev');
+      setPreviewInstallCommand(p.previewInstallCommand ?? 'npm install');
+      setPreviewInstallIfNeeded(p.previewInstallIfNeeded ?? true);
+      setPreviewWorkdir(p.previewWorkdir ?? '');
     });
   }, [projectId]);
 
   const save = async () => {
     if (!projectId) return;
     try {
-      const updated = await projectsApi.update(projectId, { name, description });
+      const updated = await projectsApi.update(projectId, {
+        name,
+        description,
+        preview_command: previewCommand.trim(),
+        preview_install_command: previewInstallCommand.trim(),
+        preview_install_if_needed: previewInstallIfNeeded,
+        preview_workdir: previewWorkdir.trim(),
+      });
       setProject(updated);
       reloadProjects();
       setMessage('已儲存');
@@ -125,6 +141,103 @@ export function ProjectSettingsPage() {
         </div>
         <Button variant="outline" onClick={relocate}>
           重新定位資料夾
+        </Button>
+        <p className="text-xs text-muted-foreground">
+          Git 根目錄：
+          {project.gitRoot ? (
+            <code className="block font-mono mt-1 break-all">{project.gitRoot}</code>
+          ) : (
+            <span className="text-amber-600"> 未偵測到（worktree 隔離不可用）</span>
+          )}
+        </p>
+      </div>
+
+      <hr className="border-border" />
+
+      <div className="flex flex-col gap-3">
+        <h2 className="text-sm font-semibold">調試預覽</h2>
+        <p className="text-xs text-muted-foreground">
+          任務詳情可一鍵在 worktree（或主 workspace）啟動開發服務。每個任務分配獨立端口（從 7500 起）。
+          命令支援 <code className="font-mono">{'{port}'}</code> 占位符；也會注入環境變數{' '}
+          <code className="font-mono">PORT</code>、<code className="font-mono">HOST=127.0.0.1</code>。
+        </p>
+        <div>
+          <Label htmlFor="preview-workdir">工作子目錄（可選）</Label>
+          <Input
+            id="preview-workdir"
+            value={previewWorkdir}
+            onChange={(e) => setPreviewWorkdir(e.target.value)}
+            className="mt-1 font-mono text-xs"
+            placeholder="frontend（相對於 worktree / workspace 根目錄）"
+          />
+          <p className="text-xs text-muted-foreground mt-1">
+            若 package.json 不在根目錄（例如 monorepo 的 frontend/），請填寫子目錄名。留空時會嘗試自動偵測。
+          </p>
+        </div>
+        <div>
+          <Label htmlFor="preview-command">啟動命令</Label>
+          <Input
+            id="preview-command"
+            value={previewCommand}
+            onChange={(e) => setPreviewCommand(e.target.value)}
+            className="mt-1 font-mono text-xs"
+            placeholder="npm run dev"
+          />
+          <p className="text-xs text-muted-foreground mt-1">
+            Vite 等框架若不吃 PORT，可改為：npm run dev -- --port {'{port}'} --host 127.0.0.1
+          </p>
+        </div>
+        <div>
+          <Label htmlFor="preview-install">安裝命令</Label>
+          <Input
+            id="preview-install"
+            value={previewInstallCommand}
+            onChange={(e) => setPreviewInstallCommand(e.target.value)}
+            className="mt-1 font-mono text-xs"
+            placeholder="npm install"
+          />
+        </div>
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={previewInstallIfNeeded}
+            onChange={(e) => setPreviewInstallIfNeeded(e.target.checked)}
+            className="rounded border-border"
+          />
+          啟動前自動安裝依賴（cwd 有 package.json 且無 node_modules 時）
+        </label>
+        <Button onClick={save}>儲存預覽設定</Button>
+      </div>
+
+      <hr className="border-border" />
+
+      <div className="flex flex-col gap-3">
+        <h2 className="text-sm font-semibold">Cursor Agent Skill</h2>
+        <p className="text-xs text-muted-foreground">
+          建立專案時會自動安裝到 workspace：
+          <code className="block font-mono mt-1 break-all">
+            {project.workspacePath}/.cursor/skills/pm-ai-agent/SKILL.md
+          </code>
+        </p>
+        <Button
+          variant="outline"
+          disabled={skillLoading}
+          onClick={async () => {
+            if (!projectId) return;
+            setSkillLoading(true);
+            setError('');
+            try {
+              const result = await projectsApi.reinstallSkill(projectId);
+              setMessage(result.updated ? 'Skill 已更新' : 'Skill 已就緒');
+              setTimeout(() => setMessage(''), 3000);
+            } catch (err) {
+              setError(err instanceof Error ? err.message : 'Skill 安裝失敗');
+            } finally {
+              setSkillLoading(false);
+            }
+          }}
+        >
+          {skillLoading ? '安裝中…' : '重新安裝 Skill'}
         </Button>
       </div>
 

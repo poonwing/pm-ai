@@ -19,6 +19,8 @@ import {
   normalizePath,
 } from './files.js';
 import {
+  DEFAULT_PREVIEW_COMMAND,
+  DEFAULT_PREVIEW_INSTALL_COMMAND,
   ProjectConfig,
   TaskFrontmatter,
   TaskStatus,
@@ -29,8 +31,22 @@ import {
   canTransition,
   LEASE_DURATION_MS,
   isPendingReview,
+  IsolationStatus,
 } from '../../shared/schemas.js';
 import type { z } from 'zod';
+import {
+  ensureTaskWorktree,
+  getExecutionPath,
+  openInCursor,
+  removeTaskWorktree,
+} from './git.js';
+import { installPmAiSkill } from './skill-install.js';
+import {
+  getPreviewStatus,
+  startPreview,
+  stopPreview,
+  attachPreviewToTask,
+} from './preview.js';
 
 export class ConflictError extends Error {
   constructor(
@@ -65,6 +81,97 @@ export class ValidationError extends Error {
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function enrichTaskResponse<T extends TaskFrontmatter & Record<string, unknown>>(
+  task: T,
+  workspacePath: string,
+): T & {
+  workspacePath: string;
+  workspace_path: string;
+  execution_path: string;
+  git_branch: string | null;
+  worktree_path: string | null;
+  isolation_base_sha: string | null;
+  isolation_status: IsolationStatus;
+  isolation_error: string | null;
+  use_isolation: boolean;
+} {
+  const gitBranch = (task.git_branch as string | null | undefined) ?? null;
+  const worktreePath = (task.worktree_path as string | null | undefined) ?? null;
+  const isolationStatus = (task.isolation_status as IsolationStatus | undefined) ?? 'none';
+  const isolationBaseSha = (task.isolation_base_sha as string | null | undefined) ?? null;
+  const isolationError = (task.isolation_error as string | null | undefined) ?? null;
+  const useIsolation = (task.use_isolation as boolean | undefined) ?? false;
+
+  return {
+    ...task,
+    workspacePath,
+    workspace_path: workspacePath,
+    git_branch: gitBranch,
+    worktree_path: worktreePath,
+    isolation_base_sha: isolationBaseSha,
+    isolation_status: isolationStatus,
+    isolation_error: isolationError,
+    use_isolation: useIsolation,
+    execution_path: getExecutionPath(workspacePath, {
+      worktree_path: worktreePath,
+      isolation_status: isolationStatus,
+      use_isolation: useIsolation,
+    }),
+  };
+}
+
+function applyTaskIsolation(
+  projectId: string,
+  taskId: string,
+  actor: 'human' | 'agent',
+  actorName?: string,
+) {
+  const project = getProject(projectId);
+  if (!project.gitRoot) {
+    const task = getTask(projectId, taskId);
+    return task;
+  }
+
+  const task = getTask(projectId, taskId);
+  if (!task.use_isolation) {
+    return task;
+  }
+
+  const isolation = ensureTaskWorktree(project.gitRoot, projectId, taskId, {
+    git_branch: task.git_branch,
+    worktree_path: task.worktree_path,
+    isolation_status: task.isolation_status,
+    isolation_base_sha: task.isolation_base_sha,
+  });
+
+  const updated = updateTaskInternal(
+    projectId,
+    taskId,
+    (fm, body) => {
+      fm.git_branch = isolation.git_branch;
+      fm.worktree_path = isolation.worktree_path;
+      fm.isolation_base_sha = isolation.isolation_base_sha;
+      fm.isolation_status = isolation.isolation_status;
+      fm.isolation_error = isolation.isolation_error ?? null;
+
+      logActivity(project.workspacePath, projectId, taskId, actor, 'updated', {
+        actorName,
+        summary:
+          isolation.isolation_status === 'ready'
+            ? `已建立隔離 worktree：${isolation.git_branch}`
+            : `worktree 建立失敗：${isolation.isolation_error ?? '未知錯誤'}`,
+      });
+
+      return { frontmatter: fm, body };
+    },
+    actor,
+    actorName,
+  );
+
+  void updated;
+  return getTask(projectId, taskId);
 }
 
 function formatTaskId(prefix: string, seq: number): string {
@@ -182,13 +289,31 @@ export function getProject(projectId: string) {
   const project = db.select().from(schema.projects).where(eq(schema.projects.id, projectId)).get();
   if (!project) throw new NotFoundError('專案不存在');
   const bindingStatus = checkProjectBinding(project.workspacePath);
-  if (bindingStatus !== project.bindingStatus) {
+  const detectedGitRoot = findGitRoot(project.workspacePath);
+  const gitRoot = detectedGitRoot ? normalizePath(detectedGitRoot) : null;
+
+  const updates: Partial<typeof schema.projects.$inferInsert> = {};
+  if (bindingStatus !== project.bindingStatus) updates.bindingStatus = bindingStatus;
+  if (gitRoot !== project.gitRoot) updates.gitRoot = gitRoot;
+
+  if (Object.keys(updates).length > 0) {
     db.update(schema.projects)
-      .set({ bindingStatus })
+      .set(updates)
       .where(eq(schema.projects.id, projectId))
       .run();
   }
-  return { ...project, bindingStatus };
+
+  return { ...project, ...updates, bindingStatus, gitRoot, ...getProjectPreviewFields(project.workspacePath) };
+}
+
+function getProjectPreviewFields(workspacePath: string) {
+  const config = readProjectConfig(workspacePath);
+  return {
+    previewCommand: config?.preview_command ?? 'npm run dev',
+    previewInstallCommand: config?.preview_install_command ?? 'npm install',
+    previewInstallIfNeeded: config?.preview_install_if_needed ?? true,
+    previewWorkdir: config?.preview_workdir ?? '',
+  };
 }
 
 export function createProject(input: z.infer<typeof CreateProjectSchema>) {
@@ -206,6 +331,7 @@ export function createProject(input: z.infer<typeof CreateProjectSchema>) {
   if (existing) throw new ValidationError('此資料夾已綁定其他專案');
 
   ensurePmAiStructure(normalizedPath);
+  const skillInstall = installPmAiSkill(normalizedPath);
   const existingConfig = readProjectConfig(normalizedPath);
 
   let config: ProjectConfig;
@@ -231,6 +357,10 @@ export function createProject(input: z.infer<typeof CreateProjectSchema>) {
       status: 'active',
       task_id_prefix: 'TASK',
       next_task_seq: 1,
+      preview_command: DEFAULT_PREVIEW_COMMAND,
+      preview_install_command: DEFAULT_PREVIEW_INSTALL_COMMAND,
+      preview_install_if_needed: true,
+      preview_workdir: '',
     };
     writeProjectConfig(normalizedPath, config);
   }
@@ -251,21 +381,46 @@ export function createProject(input: z.infer<typeof CreateProjectSchema>) {
 
   db.insert(schema.projects).values(projectRow).run();
   syncProjectTasks(config.id, normalizedPath);
-  return { ...projectRow, config };
+  return { ...projectRow, config, skillInstall };
 }
 
 export function updateProject(
   projectId: string,
-  updates: { name?: string; description?: string; archived?: boolean },
+  updates: {
+    name?: string;
+    description?: string;
+    archived?: boolean;
+    preview_command?: string;
+    preview_install_command?: string;
+    preview_install_if_needed?: boolean;
+    preview_workdir?: string;
+  },
 ) {
   const project = getProject(projectId);
   const db = getDb();
 
-  if (updates.name || updates.description) {
-    const config = readProjectConfig(project.workspacePath);
-    if (config) {
-      if (updates.name) config.name = updates.name;
-      if (updates.description !== undefined) config.description = updates.description;
+  const config = readProjectConfig(project.workspacePath);
+  if (config) {
+    if (updates.name) config.name = updates.name;
+    if (updates.description !== undefined) config.description = updates.description;
+    if (updates.preview_command !== undefined) config.preview_command = updates.preview_command;
+    if (updates.preview_install_command !== undefined) {
+      config.preview_install_command = updates.preview_install_command;
+    }
+    if (updates.preview_install_if_needed !== undefined) {
+      config.preview_install_if_needed = updates.preview_install_if_needed;
+    }
+    if (updates.preview_workdir !== undefined) {
+      config.preview_workdir = updates.preview_workdir;
+    }
+    if (
+      updates.name ||
+      updates.description !== undefined ||
+      updates.preview_command !== undefined ||
+      updates.preview_install_command !== undefined ||
+      updates.preview_install_if_needed !== undefined ||
+      updates.preview_workdir !== undefined
+    ) {
       writeProjectConfig(project.workspacePath, config);
     }
   }
@@ -308,7 +463,8 @@ export function relocateProject(projectId: string, newPath: string) {
     .run();
 
   syncProjectTasks(projectId, normalizedPath);
-  return getProject(projectId);
+  const skillInstall = installPmAiSkill(normalizedPath);
+  return { ...getProject(projectId), skillInstall };
 }
 
 export function syncProjectTasks(projectId: string, workspacePath: string) {
@@ -398,23 +554,26 @@ export function getTask(projectId: string, taskId: string) {
     .where(eq(schema.leases.taskUid, frontmatter.uid))
     .get();
 
-  return {
-    ...frontmatter,
-    body,
-    projectId,
-    project_id: projectId,
-    workspacePath: project.workspacePath,
-    workspace_path: project.workspacePath,
-    humanReviewed: frontmatter.human_reviewed,
-    claimedBy: frontmatter.claimed_by ?? null,
-    claimedAt: frontmatter.claimed_at ?? null,
-    createdAt: frontmatter.created_at,
-    updatedAt: frontmatter.updated_at,
-    completedAt: frontmatter.completed_at ?? null,
-    activities: activities.reverse(),
-    comments: readComments(project.workspacePath, taskId),
-    lease: lease ?? null,
-  };
+  return attachPreviewToTask(
+    enrichTaskResponse(
+      {
+        ...frontmatter,
+        body,
+        projectId,
+        project_id: projectId,
+        humanReviewed: frontmatter.human_reviewed,
+        claimedBy: frontmatter.claimed_by ?? null,
+        claimedAt: frontmatter.claimed_at ?? null,
+        createdAt: frontmatter.created_at,
+        updatedAt: frontmatter.updated_at,
+        completedAt: frontmatter.completed_at ?? null,
+        activities: activities.reverse(),
+        comments: readComments(project.workspacePath, taskId),
+        lease: lease ?? null,
+      },
+      project.workspacePath,
+    ),
+  );
 }
 
 export function getTaskByUid(taskUid: string) {
@@ -436,7 +595,7 @@ export function createTask(
   const hasAcceptance = (input.acceptance_criteria ?? '').trim().length > 0;
   const status = actor === 'agent' && hasAcceptance ? 'todo' : 'draft';
 
-  return withWriteLock(project.workspacePath, () => {
+  const created = withWriteLock(project.workspacePath, () => {
     const config = readProjectConfig(project.workspacePath)!;
     const taskId = formatTaskId(config.task_id_prefix, config.next_task_seq);
     const ts = now();
@@ -460,6 +619,12 @@ export function createTask(
       result_note: '',
       artifacts: [],
       rejections: [],
+      git_branch: null,
+      worktree_path: null,
+      isolation_base_sha: null,
+      isolation_status: 'none',
+      isolation_error: null,
+      use_isolation: input.use_isolation ?? false,
     };
 
     const body = input.goal
@@ -481,6 +646,12 @@ export function createTask(
 
     return { ...frontmatter, body, projectId, workspacePath: project.workspacePath };
   });
+
+  if (status === 'todo' && (input.use_isolation ?? false)) {
+    return applyTaskIsolation(projectId, created.id, actor, actorName);
+  }
+
+  return getTask(projectId, created.id);
 }
 
 function updateTaskInternal(
@@ -553,6 +724,7 @@ export function updateTaskContent(
         fm.acceptance_criteria = input.acceptance_criteria;
       if (input.constraints !== undefined) fm.constraints = input.constraints;
       if (input.agent_notes !== undefined) fm.agent_notes = input.agent_notes;
+      if (input.use_isolation !== undefined) fm.use_isolation = input.use_isolation;
       return { frontmatter: fm, body };
     },
     'human',
@@ -640,7 +812,11 @@ export function publishTask(projectId: string, taskId: string) {
   if (!task.acceptance_criteria.trim()) {
     throw new ValidationError('驗收標準不可為空，請填寫後再交給 Agent');
   }
-  return transitionTask(projectId, taskId, 'todo', 'human');
+  transitionTask(projectId, taskId, 'todo', 'human');
+  if (task.use_isolation) {
+    return applyTaskIsolation(projectId, taskId, 'human');
+  }
+  return getTask(projectId, taskId);
 }
 
 export function cancelTask(projectId: string, taskId: string, reason?: string) {
@@ -967,6 +1143,56 @@ export function addComment(
   });
 }
 
+export function reinstallProjectSkill(projectId: string) {
+  const project = getProject(projectId);
+  if (project.bindingStatus !== 'ok') {
+    throw new ValidationError('workspace 不可用');
+  }
+  const skillInstall = installPmAiSkill(project.workspacePath);
+  if (!skillInstall.installed) {
+    throw new ValidationError(skillInstall.error ?? 'Skill 安裝失敗');
+  }
+  return skillInstall;
+}
+
+export function retryTaskIsolation(projectId: string, taskId: string) {
+  const task = getTask(projectId, taskId);
+  if (!task.use_isolation) {
+    throw new ValidationError('此任務未啟用 worktree 隔離');
+  }
+  if (task.status !== 'todo' && task.status !== 'in_progress') {
+    throw new ValidationError('只有待處理或處理中的任務可重試建立 worktree');
+  }
+  return applyTaskIsolation(projectId, taskId, 'human');
+}
+
+export function getTaskPreview(projectId: string, taskId: string) {
+  const task = getTask(projectId, taskId);
+  return task.preview;
+}
+
+export async function startTaskPreview(projectId: string, taskId: string) {
+  const project = getProject(projectId);
+  const task = getTask(projectId, taskId);
+  try {
+    await startPreview(projectId, task.uid, taskId, project.workspacePath, {
+      worktree_path: task.worktree_path,
+      isolation_status: task.isolation_status,
+      use_isolation: task.use_isolation,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new ValidationError(message);
+  }
+  return getTask(projectId, taskId);
+}
+
+export async function stopTaskPreview(projectId: string, taskId: string) {
+  const task = getTask(projectId, taskId);
+  await stopPreview(task.uid);
+  return getTask(projectId, taskId);
+}
+
 export function getRecentApiActivity() {
   const db = getDb();
   return db
@@ -975,4 +1201,53 @@ export function getRecentApiActivity() {
     .orderBy(desc(schema.activityLogs.at))
     .limit(1)
     .get();
+}
+
+export function removeTaskIsolation(projectId: string, taskId: string) {
+  const project = getProject(projectId);
+  const task = getTask(projectId, taskId);
+
+  if (!project.gitRoot || !task.worktree_path) {
+    throw new ValidationError('此任務沒有可清理的 worktree');
+  }
+
+  void stopPreview(task.uid).catch(() => undefined);
+
+  const removal = removeTaskWorktree(project.gitRoot, task.worktree_path);
+  if (!removal.ok) {
+    throw new ValidationError(removal.error ?? '無法移除 worktree');
+  }
+
+  updateTaskInternal(
+    projectId,
+    taskId,
+    (fm, body) => {
+      fm.isolation_status = 'removed';
+      fm.isolation_error = null;
+      logActivity(project.workspacePath, projectId, taskId, 'human', 'updated', {
+        summary: '已清理隔離 worktree 目錄',
+      });
+      return { frontmatter: fm, body };
+    },
+    'human',
+  );
+
+  return getTask(projectId, taskId);
+}
+
+export async function openTaskInCursor(projectId: string, taskId: string) {
+  const task = getTask(projectId, taskId);
+  const target = task.execution_path;
+  if (!target) throw new ValidationError('沒有可開啟的路徑');
+
+  try {
+    await openInCursor(target);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new ValidationError(
+      `無法啟動 Cursor：${message}。請確認 cursor 命令已在 PATH 中，或手動開啟：${target}`,
+    );
+  }
+
+  return { opened: target };
 }

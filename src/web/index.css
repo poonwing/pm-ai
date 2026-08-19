@@ -67,3 +67,19 @@ body {
 .highlight-update {
   animation: highlight 1.5s ease-out;
 }
+
+.diff-panel .diff-line-insert {
+  background-color: #e6ffec;
+}
+
+.diff-panel .diff-line-delete {
+  background-color: #ffebe9;
+}
+
+.diff-panel .diff-gutter-insert {
+  background-color: #ccffd8;
+}
+
+.diff-panel .diff-gutter-delete {
+  background-color: #ffd7d5;
+}

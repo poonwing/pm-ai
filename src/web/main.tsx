@@ -8,6 +8,7 @@ import { TasksPage } from './pages/TasksPage';
 import { TaskDetailPage } from './pages/TaskDetailPage';
 import { ProjectSettingsPage, SettingsPage } from './pages/SettingsPage';
 import './index.css';
+import 'react-diff-view/style/index.css';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

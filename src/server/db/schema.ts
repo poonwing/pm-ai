@@ -69,3 +69,20 @@ export const activityLogs = sqliteTable('activity_logs', {
   summary: text('summary'),
   body: text('body'),
 });
+
+export const previewServers = sqliteTable('preview_servers', {
+  taskUid: text('task_uid').primaryKey(),
+  projectId: text('project_id')
+    .notNull()
+    .references(() => projects.id),
+  taskId: text('task_id').notNull(),
+  status: text('status').notNull().default('stopped'),
+  port: integer('port'),
+  pid: integer('pid'),
+  cwd: text('cwd'),
+  command: text('command'),
+  logTail: text('log_tail').default('[]'),
+  error: text('error'),
+  startedAt: text('started_at'),
+  updatedAt: text('updated_at').notNull(),
+});

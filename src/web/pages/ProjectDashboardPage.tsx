@@ -61,7 +61,7 @@ export function ProjectDashboardPage() {
           <h1 className="text-xl font-semibold">{project.name}</h1>
           <p className="text-xs text-muted-foreground font-mono mt-1">{project.workspacePath}</p>
         </div>
-        <Link to={`/projects/${projectId}/tasks`}>
+        <Link to={`/projects/${projectId}/tasks?new=1`}>
           <Button>新增任務</Button>
         </Link>
       </div>
@@ -151,7 +151,7 @@ export function ProjectDashboardPage() {
       {dashboard.stats.total === 0 && (
         <Card className="text-center py-8">
           <p className="text-muted-foreground mb-4">尚無任務。先寫成草稿，確認驗收標準後再交給 Agent。</p>
-          <Link to={`/projects/${projectId}/tasks`}>
+          <Link to={`/projects/${projectId}/tasks?new=1`}>
             <Button>新增任務</Button>
           </Link>
         </Card>

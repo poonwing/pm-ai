@@ -1,6 +1,7 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
-import { tasksApi, Task } from '../lib/api';
+import { Diff, Hunk, parseDiff } from 'react-diff-view';
+import { tasksApi, projectsApi, Task, Project, TaskChangesSummary, FileDiffResponse } from '../lib/api';
 import { Button, Badge, Input, Textarea, Label, Dialog } from '../components/ui';
 import { formatRelativeTime, statusLabel, statusColor } from '../lib/utils';
 
@@ -22,6 +23,8 @@ export function TaskDetailPage() {
   const [cancelReason, setCancelReason] = useState('');
   const [commentDraft, setCommentDraft] = useState('');
   const [commentSending, setCommentSending] = useState(false);
+  const [project, setProject] = useState<Project | null>(null);
+  const [useIsolation, setUseIsolation] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const load = useCallback(async () => {
@@ -33,8 +36,14 @@ export function TaskDetailPage() {
     setAcceptanceCriteria((data as Task & { acceptance_criteria?: string }).acceptance_criteria ?? '');
     setConstraints((data as Task & { constraints?: string }).constraints ?? '');
     setAgentNotes((data as Task & { agent_notes?: string }).agent_notes ?? '');
+    setUseIsolation(data.use_isolation ?? false);
     setSaved(true);
   }, [projectId, taskId]);
+
+  useEffect(() => {
+    if (!projectId) return;
+    projectsApi.get(projectId).then(setProject).catch(() => setProject(null));
+  }, [projectId]);
 
   useEffect(() => {
     load();
@@ -53,6 +62,7 @@ export function TaskDetailPage() {
     acceptance_criteria?: string;
     constraints?: string;
     agent_notes?: string;
+    use_isolation?: boolean;
   }) => {
     if (isLocked || !task || !projectId || !taskId) return;
     setSaved(false);
@@ -201,6 +211,10 @@ export function TaskDetailPage() {
         </p>
       )}
 
+      {isPendingReview && (
+        <ChangesPanel projectId={projectId!} taskId={taskId!} task={task} />
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 flex flex-col gap-5">
           <Field
@@ -235,6 +249,42 @@ export function TaskDetailPage() {
             onChange={(v) => handleFieldChange('agent_notes', v)}
             multiline
           />
+
+          {isDraft && (
+            <section className="rounded-lg border border-blue-200 bg-blue-50/50 p-4">
+              <h3 className="text-sm font-semibold text-blue-900 mb-2">Git 隔離（worktree）</h3>
+              <label
+                className={`flex items-start gap-2 text-sm ${project?.gitRoot ? 'cursor-pointer' : 'cursor-not-allowed'}`}
+              >
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4"
+                  checked={project?.gitRoot ? useIsolation : false}
+                  disabled={isLocked || !project?.gitRoot}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setUseIsolation(checked);
+                    scheduleSave({ use_isolation: checked });
+                  }}
+                />
+                <span>
+                  交給 Agent 時建立獨立 branch 與 worktree
+                  <span className="block text-xs text-muted-foreground mt-1">
+                    {project?.gitRoot ? (
+                      <>
+                        已偵測 git：
+                        <code className="font-mono text-[11px] break-all">{project.gitRoot}</code>
+                      </>
+                    ) : project === null ? (
+                      '正在檢查 git 倉庫…'
+                    ) : (
+                      '此 workspace 未偵測到 git 倉庫，無法使用 worktree 隔離'
+                    )}
+                  </span>
+                </span>
+              </label>
+            </section>
+          )}
 
           {(task as Task & { result_note?: string }).result_note && (
             <div>
@@ -291,6 +341,22 @@ export function TaskDetailPage() {
               </p>
             </section>
           )}
+
+          <IsolationPanel
+            task={task}
+            projectId={projectId!}
+            actionLoading={actionLoading}
+            onAction={doAction}
+          />
+
+          <PreviewPanel
+            task={task}
+            projectId={projectId!}
+            project={project}
+            actionLoading={actionLoading}
+            onAction={doAction}
+            onRefresh={load}
+          />
 
           {task.activities && task.activities.filter((a) => a.action !== 'commented').length > 0 && (
             <section className="rounded-lg border border-border p-4">
@@ -431,6 +497,483 @@ export function TaskDetailPage() {
       </Dialog>
     </div>
   );
+}
+
+function ChangesPanel({
+  projectId,
+  taskId,
+  task,
+}: {
+  projectId: string;
+  taskId: string;
+  task: Task;
+}) {
+  const [summary, setSummary] = useState<TaskChangesSummary | null>(null);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [fileDiff, setFileDiff] = useState<FileDiffResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    setLoading(true);
+    setError('');
+    tasksApi
+      .getChanges(projectId, taskId)
+      .then((data) => {
+        setSummary(data);
+        setSelectedPath(data.files[0]?.path ?? null);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : '載入變更失敗'))
+      .finally(() => setLoading(false));
+  }, [projectId, taskId]);
+
+  useEffect(() => {
+    if (!selectedPath) {
+      setFileDiff(null);
+      return;
+    }
+    setDiffLoading(true);
+    tasksApi
+      .getChangeDiff(projectId, taskId, selectedPath)
+      .then(setFileDiff)
+      .catch((err) => setError(err instanceof Error ? err.message : '載入 diff 失敗'))
+      .finally(() => setDiffLoading(false));
+  }, [projectId, taskId, selectedPath]);
+
+  const parsedDiffs = useMemo(() => {
+    if (!fileDiff?.patch) return [];
+    try {
+      return parseDiff(fileDiff.patch);
+    } catch {
+      return [];
+    }
+  }, [fileDiff?.patch]);
+
+  const statusColor = (status: string) => {
+    if (status === 'A' || status === '?') return 'text-green-700';
+    if (status === 'D') return 'text-red-600';
+    return 'text-amber-700';
+  };
+
+  const artifacts = (task as Task & { artifacts?: string[] }).artifacts ?? [];
+
+  if (loading) {
+    return (
+      <section className="rounded-lg border border-border p-4 mb-6">
+        <p className="text-sm text-muted-foreground">載入程式碼變更…</p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="rounded-lg border border-border p-4 mb-6">
+      <h3 className="text-sm font-semibold mb-2">程式碼變更</h3>
+
+      {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+
+      {summary && summary.mode !== 'none' && (
+        <div className="text-xs text-muted-foreground mb-3 flex flex-wrap gap-x-3 gap-y-1">
+          <span>{summary.base_label} → {summary.head_label}</span>
+          <span className="text-green-700">+{summary.stats.additions}</span>
+          <span className="text-red-600">-{summary.stats.deletions}</span>
+          <span>{summary.stats.files} 個檔案</span>
+          {summary.has_uncommitted && <span className="text-amber-600">含未提交變更</span>}
+        </div>
+      )}
+
+      {summary?.warning && (
+        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-3">
+          {summary.warning}
+        </p>
+      )}
+
+      {summary && summary.files.length === 0 ? (
+        <div className="text-sm text-muted-foreground">
+          <p>沒有偵測到 git 變更。</p>
+          {artifacts.length > 0 && (
+            <div className="mt-2">
+              <p className="text-xs mb-1">Agent 回報的產出：</p>
+              <ul className="font-mono text-xs">
+                {artifacts.map((a) => (
+                  <li key={a}>{a}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-[minmax(140px,220px)_1fr] gap-3 min-h-[280px]">
+          <div className="border border-border rounded overflow-auto max-h-[480px]">
+            {summary?.files.map((file) => (
+              <button
+                key={file.path}
+                type="button"
+                onClick={() => setSelectedPath(file.path)}
+                className={`w-full text-left px-2 py-1.5 text-xs font-mono border-b border-border last:border-b-0 hover:bg-muted ${
+                  selectedPath === file.path ? 'bg-muted' : ''
+                }`}
+              >
+                <span className={`mr-1 ${statusColor(file.status)}`}>{file.status}</span>
+                <span className="break-all">{file.path}</span>
+                {!file.binary && (
+                  <span className="block text-[10px] text-muted-foreground mt-0.5">
+                    +{file.additions} -{file.deletions}
+                  </span>
+                )}
+                {file.binary && (
+                  <span className="block text-[10px] text-muted-foreground mt-0.5">binary</span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          <div className="border border-border rounded overflow-auto max-h-[480px] bg-white">
+            {diffLoading && (
+              <p className="text-xs text-muted-foreground p-3">載入 diff…</p>
+            )}
+            {!diffLoading && fileDiff && (
+              <>
+                <div className="text-[11px] text-muted-foreground px-3 py-2 border-b border-border sticky top-0 bg-white">
+                  {fileDiff.old_label} | {fileDiff.new_label}
+                </div>
+                {fileDiff.binary || fileDiff.too_large ? (
+                  <p className="text-sm text-muted-foreground p-3">
+                    此檔案為二進位或過大，請在 Cursor 中開啟檢視。
+                  </p>
+                ) : !fileDiff.patch ? (
+                  <p className="text-sm text-muted-foreground p-3">此檔案沒有可顯示的文字 diff。</p>
+                ) : parsedDiffs.length === 0 ? (
+                  <pre className="text-[11px] font-mono p-3 whitespace-pre-wrap">{fileDiff.patch}</pre>
+                ) : (
+                  <div className="diff-panel text-[11px]">
+                    {parsedDiffs.map((file) => (
+                      <Diff
+                        key={`${file.oldPath}-${file.newPath}`}
+                        viewType="split"
+                        diffType={file.type}
+                        hunks={file.hunks}
+                      >
+                        {(hunks) =>
+                          hunks.map((hunk) => <Hunk key={hunk.content} hunk={hunk} />)
+                        }
+                      </Diff>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PreviewPanel({
+  task,
+  projectId,
+  project,
+  actionLoading,
+  onAction,
+  onRefresh,
+}: {
+  task: Task;
+  projectId: string;
+  project: Project | null;
+  actionLoading: string;
+  onAction: (action: string, fn: () => Promise<Task>) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const [showLogs, setShowLogs] = useState(false);
+  const preview = task.preview;
+  const status = preview?.status ?? 'stopped';
+  const isActive = status === 'running' || status === 'starting';
+  const cwd = preview?.cwd ?? task.execution_path ?? task.workspacePath;
+  const canControl = task.status !== 'cancelled';
+
+  useEffect(() => {
+    if (!isActive) return;
+    const timer = setInterval(() => {
+      void onRefresh();
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [isActive, onRefresh]);
+
+  const copyText = async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      // ignore
+    }
+  };
+
+  const statusLabel =
+    status === 'running'
+      ? '運行中'
+      : status === 'starting'
+        ? '啟動中…'
+        : status === 'error'
+          ? '錯誤'
+          : '已停止';
+
+  return (
+    <section className="rounded-lg border border-border p-4">
+      <h3 className="text-sm font-semibold mb-3">調試預覽</h3>
+      <dl className="text-xs flex flex-col gap-2 mb-3">
+        <div className="flex justify-between gap-2">
+          <dt className="text-muted-foreground shrink-0">狀態</dt>
+          <dd>
+            {status === 'running' && <span className="text-green-700">{statusLabel}</span>}
+            {status === 'starting' && <span className="text-amber-600">{statusLabel}</span>}
+            {status === 'error' && <span className="text-red-600">{statusLabel}</span>}
+            {status === 'stopped' && <span className="text-muted-foreground">{statusLabel}</span>}
+          </dd>
+        </div>
+        {cwd && (
+          <div className="flex flex-col gap-1">
+            <dt className="text-muted-foreground">工作目錄</dt>
+            <dd className="font-mono text-[11px] break-all">{cwd}</dd>
+          </div>
+        )}
+        {preview?.port != null && (
+          <div className="flex justify-between gap-2">
+            <dt className="text-muted-foreground shrink-0">端口</dt>
+            <dd className="font-mono">{preview.port}</dd>
+          </div>
+        )}
+        {preview?.command && (
+          <div className="flex flex-col gap-1">
+            <dt className="text-muted-foreground">命令</dt>
+            <dd className="font-mono text-[11px] break-all">{preview.command}</dd>
+          </div>
+        )}
+      </dl>
+
+      {preview?.url && (
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <a
+            href={preview.url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-sm text-blue-600 hover:underline font-mono"
+          >
+            {preview.url}
+          </a>
+          <Button size="sm" variant="ghost" onClick={() => copyText(preview.url!)}>
+            複製
+          </Button>
+        </div>
+      )}
+
+      {preview?.error && (
+        <p className="text-xs text-red-600 mb-3 whitespace-pre-wrap">{preview.error}</p>
+      )}
+
+      {(status === 'running' || status === 'starting') && (
+        <p className="text-xs text-muted-foreground mb-3">
+          若頁面暫時打不開，請稍等幾秒或查看下方日誌。
+        </p>
+      )}
+
+      <div className="flex flex-col gap-2">
+        {canControl && status !== 'running' && status !== 'starting' && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => onAction('preview-start', () => tasksApi.startPreview(projectId, task.id))}
+            disabled={actionLoading === 'preview-start'}
+          >
+            啟動調試服務
+          </Button>
+        )}
+        {canControl && (status === 'running' || status === 'starting' || status === 'error') && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => onAction('preview-stop', () => tasksApi.stopPreview(projectId, task.id))}
+            disabled={actionLoading === 'preview-stop'}
+          >
+            停止
+          </Button>
+        )}
+        {(preview?.log_tail?.length ?? 0) > 0 && (
+          <Button size="sm" variant="ghost" onClick={() => setShowLogs((v) => !v)}>
+            {showLogs ? '隱藏日誌' : '顯示最近日誌'}
+          </Button>
+        )}
+      </div>
+
+      {showLogs && (preview?.log_tail?.length ?? 0) > 0 && (
+        <pre className="mt-3 text-[11px] font-mono bg-muted rounded p-2 max-h-48 overflow-auto whitespace-pre-wrap">
+          {preview!.log_tail.join('\n')}
+        </pre>
+      )}
+
+      <p className="text-xs text-muted-foreground mt-3">
+        啟動命令在{' '}
+        <Link to={`/projects/${projectId}/settings`} className="text-blue-600 hover:underline">
+          專案設定
+        </Link>
+        {project?.previewCommand ? (
+          <>（目前：<code className="font-mono">{project.previewCommand}</code>）</>
+        ) : null}
+      </p>
+    </section>
+  );
+}
+
+function IsolationPanel({
+  task,
+  projectId,
+  actionLoading,
+  onAction,
+}: {
+  task: Task;
+  projectId: string;
+  actionLoading: string;
+  onAction: (action: string, fn: () => Promise<Task>) => void;
+}) {
+  const showPanel =
+    task.use_isolation ||
+    task.isolation_status !== 'none' ||
+    !!task.git_branch ||
+    !!task.worktree_path;
+
+  if (!showPanel) return null;
+
+  const isReady = task.isolation_status === 'ready';
+  const isFailed = task.isolation_status === 'failed';
+  const isRemoved = task.isolation_status === 'removed';
+  const canManage = task.status === 'todo' || task.status === 'in_progress';
+  const canCleanup =
+    !!task.worktree_path && (isReady || isFailed || isRemoved || task.status === 'done');
+
+  const copyPath = async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      // ignore
+    }
+  };
+
+  return (
+    <section className="rounded-lg border border-border p-4">
+      <h3 className="text-sm font-semibold mb-3">開發隔離</h3>
+      <dl className="text-xs flex flex-col gap-2 mb-3">
+        <div className="flex justify-between gap-2">
+          <dt className="text-muted-foreground shrink-0">狀態</dt>
+          <dd>
+            {isReady && <span className="text-green-700">worktree 就緒</span>}
+            {isFailed && <span className="text-red-600">建立失敗</span>}
+            {isRemoved && <span className="text-muted-foreground">已清理</span>}
+            {task.isolation_status === 'none' && (
+              <span className="text-muted-foreground">
+                {task.use_isolation ? '尚未建立（交給 Agent 時建立）' : '未啟用'}
+              </span>
+            )}
+          </dd>
+        </div>
+        {task.git_branch && (
+          <div className="flex justify-between gap-2">
+            <dt className="text-muted-foreground shrink-0">Branch</dt>
+            <dd className="font-mono text-right break-all">{task.git_branch}</dd>
+          </div>
+        )}
+        {task.worktree_path && (
+          <div className="flex flex-col gap-1">
+            <dt className="text-muted-foreground">Worktree</dt>
+            <dd className="font-mono text-[11px] break-all">{task.worktree_path}</dd>
+          </div>
+        )}
+        {task.execution_path && (
+          <div className="flex flex-col gap-1">
+            <dt className="text-muted-foreground">Agent 工作目錄</dt>
+            <dd className="font-mono text-[11px] break-all">{task.execution_path}</dd>
+          </div>
+        )}
+        {task.isolation_base_sha && (
+          <div className="flex justify-between gap-2">
+            <dt className="text-muted-foreground shrink-0">Base SHA</dt>
+            <dd className="font-mono text-right truncate max-w-[160px]" title={task.isolation_base_sha}>
+              {task.isolation_base_sha.slice(0, 12)}…
+            </dd>
+          </div>
+        )}
+      </dl>
+
+      {isFailed && task.isolation_error && (
+        <p className="text-xs text-red-600 mb-3 whitespace-pre-wrap">{task.isolation_error}</p>
+      )}
+
+      {isPendingReview(task) && task.git_branch && (
+        <p className="text-xs text-muted-foreground mb-3">
+          驗收通過後，可在主 workspace 執行：
+          <code className="block mt-1 font-mono bg-muted rounded px-2 py-1">
+            git merge {task.git_branch}
+          </code>
+        </p>
+      )}
+
+      <div className="flex flex-col gap-2">
+        {isReady && task.execution_path && (
+          <>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                onAction('open-cursor', () => tasksApi.openInCursor(projectId, task.id).then(() => task))
+              }
+              disabled={actionLoading === 'open-cursor'}
+            >
+              用 Cursor 開啟
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => task.execution_path && copyPath(task.execution_path)}
+            >
+              複製工作目錄
+            </Button>
+          </>
+        )}
+        {(isFailed || (canManage && task.use_isolation && task.isolation_status === 'none')) && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              onAction('retry-isolation', () => tasksApi.retryIsolation(projectId, task.id))
+            }
+            disabled={actionLoading === 'retry-isolation'}
+          >
+            重試建立 worktree
+          </Button>
+        )}
+        {canCleanup && task.isolation_status !== 'removed' && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() =>
+              onAction('remove-isolation', () => tasksApi.removeIsolation(projectId, task.id))
+            }
+            disabled={actionLoading === 'remove-isolation'}
+          >
+            清理隔離目錄
+          </Button>
+        )}
+      </div>
+
+      {isReady && (task.status === 'todo' || task.status === 'in_progress') && (
+        <p className="text-xs text-muted-foreground mt-3">
+          請在 worktree 目錄開啟 Cursor 後再讓 Agent 認領，避免多任務同時改主目錄。
+        </p>
+      )}
+    </section>
+  );
+}
+
+function isPendingReview(task: Task): boolean {
+  return task.status === 'done' && !task.humanReviewed;
 }
 
 function Field({

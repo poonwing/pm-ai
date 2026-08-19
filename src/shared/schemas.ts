@@ -38,6 +38,16 @@ export const ACTIVITY_ACTIONS = [
 ] as const;
 export type ActivityAction = (typeof ACTIVITY_ACTIONS)[number];
 
+export const ISOLATION_STATUSES = ['none', 'ready', 'failed', 'removed'] as const;
+export type IsolationStatus = (typeof ISOLATION_STATUSES)[number];
+
+export const PREVIEW_STATUSES = ['stopped', 'starting', 'running', 'error'] as const;
+export type PreviewStatus = (typeof PREVIEW_STATUSES)[number];
+
+export const DEFAULT_PREVIEW_COMMAND = 'npm run dev';
+export const DEFAULT_PREVIEW_INSTALL_COMMAND = 'npm install';
+export const PREVIEW_BASE_PORT = 7500;
+
 export const RejectionSchema = z.object({
   reason: z.string(),
   at: z.string(),
@@ -67,6 +77,12 @@ export const TaskFrontmatterSchema = z.object({
   artifacts: z.array(z.string()).default([]),
   rejections: z.array(RejectionSchema).default([]),
   content_hash: z.string().optional(),
+  git_branch: z.string().nullable().optional().default(null),
+  worktree_path: z.string().nullable().optional().default(null),
+  isolation_base_sha: z.string().nullable().optional().default(null),
+  isolation_status: z.enum(ISOLATION_STATUSES).optional().default('none'),
+  isolation_error: z.string().nullable().optional().default(null),
+  use_isolation: z.boolean().optional().default(false),
 });
 
 export type TaskFrontmatter = z.infer<typeof TaskFrontmatterSchema>;
@@ -80,6 +96,10 @@ export const ProjectConfigSchema = z.object({
   status: z.enum(['active', 'archived']).default('active'),
   task_id_prefix: z.string().default('TASK'),
   next_task_seq: z.number().int().positive().default(1),
+  preview_command: z.string().default(DEFAULT_PREVIEW_COMMAND),
+  preview_install_command: z.string().default(DEFAULT_PREVIEW_INSTALL_COMMAND),
+  preview_install_if_needed: z.boolean().default(true),
+  preview_workdir: z.string().default(''),
 });
 
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
@@ -94,6 +114,10 @@ export const UpdateProjectSchema = z.object({
   name: z.string().min(1).optional(),
   description: z.string().optional(),
   archived: z.boolean().optional(),
+  preview_command: z.string().min(1).optional(),
+  preview_install_command: z.string().min(1).optional(),
+  preview_install_if_needed: z.boolean().optional(),
+  preview_workdir: z.string().optional(),
 });
 
 export const RelocateProjectSchema = z.object({
@@ -107,6 +131,7 @@ export const CreateTaskSchema = z.object({
   constraints: z.string().optional(),
   agent_notes: z.string().optional(),
   agent_name: z.string().min(1).optional(),
+  use_isolation: z.boolean().optional().default(false),
 });
 
 export const UpdateTaskSchema = z.object({
@@ -116,6 +141,7 @@ export const UpdateTaskSchema = z.object({
   constraints: z.string().optional(),
   agent_notes: z.string().optional(),
   expected_version: z.number().int().positive(),
+  use_isolation: z.boolean().optional(),
 });
 
 export const ClaimTaskSchema = z.object({
@@ -193,6 +219,47 @@ export function canTransition(
 export function isPendingReview(task: TaskFrontmatter): boolean {
   return task.status === 'done' && !task.human_reviewed;
 }
+
+export const CHANGE_FILE_STATUSES = ['A', 'M', 'D', 'R', '?'] as const;
+export type ChangeFileStatus = (typeof CHANGE_FILE_STATUSES)[number];
+
+export const ChangedFileSchema = z.object({
+  path: z.string(),
+  status: z.enum(CHANGE_FILE_STATUSES),
+  additions: z.number().int().nonnegative(),
+  deletions: z.number().int().nonnegative(),
+  binary: z.boolean(),
+});
+
+export const TaskChangesSummarySchema = z.object({
+  mode: z.enum(['isolated', 'workspace', 'none']),
+  base_sha: z.string().nullable(),
+  head_sha: z.string().nullable(),
+  base_label: z.string(),
+  head_label: z.string(),
+  has_uncommitted: z.boolean(),
+  warning: z.string().optional(),
+  files: z.array(ChangedFileSchema),
+  stats: z.object({
+    files: z.number().int().nonnegative(),
+    additions: z.number().int().nonnegative(),
+    deletions: z.number().int().nonnegative(),
+  }),
+});
+
+export type TaskChangesSummary = z.infer<typeof TaskChangesSummarySchema>;
+
+export const FileDiffResponseSchema = z.object({
+  path: z.string(),
+  status: z.string(),
+  patch: z.string(),
+  too_large: z.boolean(),
+  old_label: z.string(),
+  new_label: z.string(),
+  binary: z.boolean(),
+});
+
+export type FileDiffResponse = z.infer<typeof FileDiffResponseSchema>;
 
 export function needsHumanAttention(task: TaskFrontmatter): boolean {
   if (task.status === 'draft') return true;

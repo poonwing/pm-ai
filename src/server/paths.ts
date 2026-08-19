@@ -61,6 +61,7 @@ export const PM_AI_README = `# PM-AI Workspace
 - **Agent 請勿直接修改 \`tasks/\` 目錄下的檔案**，應透過 API 更新任務狀態
 - 任務狀態變更請走 \`http://127.0.0.1:7432/api/v1\`
 - 人可以直接編輯草稿任務的 markdown 內容
+- 新建 PM-AI 專案時，會自動安裝 Cursor Skill 至 \`.cursor/skills/pm-ai-agent/SKILL.md\`
 `;
 
 export const PM_AI_GITIGNORE = `locks/

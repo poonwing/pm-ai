@@ -64,6 +64,52 @@ export interface Project {
   gitRoot: string | null;
   createdAt: string;
   lastOpenedAt: string | null;
+  previewCommand?: string;
+  previewInstallCommand?: string;
+  previewInstallIfNeeded?: boolean;
+  previewWorkdir?: string;
+}
+
+export interface PreviewInfo {
+  status: import('@shared/schemas').PreviewStatus;
+  port: number | null;
+  url: string | null;
+  pid: number | null;
+  cwd: string | null;
+  command: string | null;
+  log_tail: string[];
+  error: string | null;
+  started_at: string | null;
+}
+
+export interface ChangedFile {
+  path: string;
+  status: import('@shared/schemas').ChangeFileStatus;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+}
+
+export interface TaskChangesSummary {
+  mode: 'isolated' | 'workspace' | 'none';
+  base_sha: string | null;
+  head_sha: string | null;
+  base_label: string;
+  head_label: string;
+  has_uncommitted: boolean;
+  warning?: string;
+  files: ChangedFile[];
+  stats: { files: number; additions: number; deletions: number };
+}
+
+export interface FileDiffResponse {
+  path: string;
+  status: string;
+  patch: string;
+  too_large: boolean;
+  old_label: string;
+  new_label: string;
+  binary: boolean;
 }
 
 export interface Task {
@@ -92,6 +138,15 @@ export interface Task {
   activities?: ActivityLog[];
   comments?: TaskComment[];
   lease?: Lease | null;
+  git_branch?: string | null;
+  worktree_path?: string | null;
+  isolation_base_sha?: string | null;
+  isolation_status?: import('@shared/schemas').IsolationStatus;
+  isolation_error?: string | null;
+  execution_path?: string;
+  workspace_path?: string;
+  use_isolation?: boolean;
+  preview?: PreviewInfo;
 }
 
 export interface TaskComment {
@@ -154,13 +209,29 @@ export const projectsApi = {
   get: (id: string) => api<Project>(`/projects/${id}`),
   create: (data: { name: string; workspace_path: string; description?: string }) =>
     api<Project>('/projects', { method: 'POST', body: JSON.stringify(data) }),
-  update: (id: string, data: { name?: string; description?: string; archived?: boolean }) =>
+  update: (
+    id: string,
+    data: {
+      name?: string;
+      description?: string;
+      archived?: boolean;
+      preview_command?: string;
+      preview_install_command?: string;
+      preview_install_if_needed?: boolean;
+      preview_workdir?: string;
+    },
+  ) =>
     api<Project>(`/projects/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   relocate: (id: string, workspace_path: string) =>
     api<Project>(`/projects/${id}/relocate`, {
       method: 'POST',
       body: JSON.stringify({ workspace_path }),
     }),
+  reinstallSkill: (id: string) =>
+    api<{ installed: boolean; skillPath: string | null; updated: boolean }>(
+      `/projects/${id}/skill/reinstall`,
+      { method: 'POST' },
+    ),
   dashboard: (id: string) => api<Dashboard>(`/projects/${id}/dashboard`),
 };
 
@@ -169,7 +240,17 @@ export const tasksApi = {
     api<Task[]>(`/projects/${projectId}/tasks${status ? `?status=${status}` : ''}`),
   get: (projectId: string, taskId: string) =>
     api<Task>(`/tasks/${taskId}?project_id=${projectId}`),
-  create: (projectId: string, data: { title: string; goal?: string; acceptance_criteria?: string }) =>
+  create: (
+    projectId: string,
+    data: {
+      title: string;
+      goal?: string;
+      acceptance_criteria?: string;
+      constraints?: string;
+      agent_notes?: string;
+      use_isolation?: boolean;
+    },
+  ) =>
     api<Task>(`/projects/${projectId}/tasks`, { method: 'POST', body: JSON.stringify(data) }),
   update: (
     projectId: string,
@@ -180,6 +261,7 @@ export const tasksApi = {
       acceptance_criteria?: string;
       constraints?: string;
       expected_version: number;
+      use_isolation?: boolean;
     },
   ) =>
     api<Task>(`/tasks/${taskId}?project_id=${projectId}`, {
@@ -211,6 +293,26 @@ export const tasksApi = {
       method: 'POST',
       body: JSON.stringify({ body }),
     }),
+  retryIsolation: (projectId: string, taskId: string) =>
+    api<Task>(`/tasks/${taskId}/isolation/retry?project_id=${projectId}`, { method: 'POST' }),
+  removeIsolation: (projectId: string, taskId: string) =>
+    api<Task>(`/tasks/${taskId}/isolation/remove?project_id=${projectId}`, { method: 'POST' }),
+  openInCursor: (projectId: string, taskId: string) =>
+    api<{ opened: string }>(`/tasks/${taskId}/isolation/open-cursor?project_id=${projectId}`, {
+      method: 'POST',
+    }),
+  getPreview: (projectId: string, taskId: string) =>
+    api<PreviewInfo>(`/tasks/${taskId}/preview?project_id=${projectId}`),
+  startPreview: (projectId: string, taskId: string) =>
+    api<Task>(`/tasks/${taskId}/preview/start?project_id=${projectId}`, { method: 'POST' }),
+  stopPreview: (projectId: string, taskId: string) =>
+    api<Task>(`/tasks/${taskId}/preview/stop?project_id=${projectId}`, { method: 'POST' }),
+  getChanges: (projectId: string, taskId: string) =>
+    api<TaskChangesSummary>(`/tasks/${taskId}/changes?project_id=${projectId}`),
+  getChangeDiff: (projectId: string, taskId: string, path: string) =>
+    api<FileDiffResponse>(
+      `/tasks/${taskId}/changes/diff?project_id=${projectId}&path=${encodeURIComponent(path)}`,
+    ),
 };
 
 export const configApi = {

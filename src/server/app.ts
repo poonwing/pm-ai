@@ -29,6 +29,8 @@ import {
   PORT,
 } from '../shared/schemas.js';
 import * as taskService from './services/tasks.js';
+import { getTaskChanges, getTaskFileDiff } from './services/changes.js';
+import { stopAllPreviews } from './services/preview.js';
 import {
   ConflictError,
   NotFoundError,
@@ -225,6 +227,14 @@ app.post('/api/v1/projects/:id/relocate', authMiddleware('human'), zValidator('j
   }
 });
 
+app.post('/api/v1/projects/:id/skill/reinstall', authMiddleware('human'), (c) => {
+  try {
+    return c.json(taskService.reinstallProjectSkill(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
 // Tasks - list & create
 app.get('/api/v1/projects/:id/tasks', authMiddleware('any'), (c) => {
   try {
@@ -367,6 +377,91 @@ app.post('/api/v1/tasks/:id/unlock', authMiddleware('human'), (c) => {
   }
 });
 
+app.post('/api/v1/tasks/:id/isolation/retry', authMiddleware('human'), (c) => {
+  try {
+    const projectId = c.req.query('project_id');
+    if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
+    return c.json(taskService.retryTaskIsolation(projectId, requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post('/api/v1/tasks/:id/isolation/remove', authMiddleware('human'), (c) => {
+  try {
+    const projectId = c.req.query('project_id');
+    if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
+    return c.json(taskService.removeTaskIsolation(projectId, requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post('/api/v1/tasks/:id/isolation/open-cursor', authMiddleware('human'), async (c) => {
+  try {
+    const projectId = c.req.query('project_id');
+    if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
+    const result = await taskService.openTaskInCursor(projectId, requireParam(c, 'id'));
+    return c.json(result);
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.get('/api/v1/tasks/:id/preview', authMiddleware('human'), (c) => {
+  try {
+    const projectId = c.req.query('project_id');
+    if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
+    return c.json(taskService.getTaskPreview(projectId, requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post('/api/v1/tasks/:id/preview/start', authMiddleware('human'), async (c) => {
+  try {
+    const projectId = c.req.query('project_id');
+    if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
+    const task = await taskService.startTaskPreview(projectId, requireParam(c, 'id'));
+    return c.json(task);
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post('/api/v1/tasks/:id/preview/stop', authMiddleware('human'), async (c) => {
+  try {
+    const projectId = c.req.query('project_id');
+    if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
+    const task = await taskService.stopTaskPreview(projectId, requireParam(c, 'id'));
+    return c.json(task);
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.get('/api/v1/tasks/:id/changes', authMiddleware('human'), (c) => {
+  try {
+    const projectId = c.req.query('project_id');
+    if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
+    return c.json(getTaskChanges(projectId, requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.get('/api/v1/tasks/:id/changes/diff', authMiddleware('human'), (c) => {
+  try {
+    const projectId = c.req.query('project_id');
+    const filePath = c.req.query('path');
+    if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
+    if (!filePath) return c.json({ error: '需要 path 參數', code: 'VALIDATION' }, 400);
+    return c.json(getTaskFileDiff(projectId, requireParam(c, 'id'), filePath));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
 // Agent task actions
 app.post('/api/v1/tasks/:id/claim', authMiddleware('agent'), zValidator('json', ClaimTaskSchema), (c) => {
   try {
@@ -484,6 +579,12 @@ export function startServer() {
   const config = getConfig();
   console.log(`PM-AI 啟動於 ${config.baseUrl}`);
   console.log(`Token 儲存於 %APPDATA%/pm-ai/config.json`);
+
+  const shutdown = () => {
+    void stopAllPreviews().finally(() => process.exit(0));
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 
   serve({
     fetch: app.fetch,
