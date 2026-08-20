@@ -1,4 +1,4 @@
-import { eq, and, desc } from 'drizzle-orm';
+import { eq, and, desc, inArray } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import fs from 'fs';
@@ -17,6 +17,7 @@ import {
   findGitRoot,
   ensurePmAiStructure,
   normalizePath,
+  getCommentsFilePath,
 } from './files.js';
 import {
   DEFAULT_PREVIEW_COMMAND,
@@ -40,7 +41,10 @@ import {
   getExecutionPath,
   openInCursor,
   removeTaskWorktree,
+  worktreePathForTask,
   localBranchExists,
+  taskBranchName,
+  forceDeleteLocalBranch,
   isBranchMergedInto,
   getWorktreeDirty,
   worktreePathExists,
@@ -50,12 +54,15 @@ import {
   collectMergeCheckTargets,
   listLocalBranches,
   hasUncommittedChanges,
+  runGit,
 } from './git.js';
+import { getPmAiDir } from '../paths.js';
 import { installPmAiSkill } from './skill-install.js';
 import {
   getPreviewStatus,
   startPreview,
   stopPreview,
+  stopPreviewsForProject,
   attachPreviewToTask,
 } from './preview.js';
 
@@ -1578,4 +1585,266 @@ export async function openTaskInCursor(projectId: string, taskId: string) {
   }
 
   return { opened: target };
+}
+
+function cleanupTaskGitForDelete(
+  gitRoot: string,
+  projectId: string,
+  task: {
+    id: string;
+    git_branch?: string | null;
+    worktree_path?: string | null;
+  },
+  options: { force?: boolean } = {},
+): string[] {
+  const warnings: string[] = [];
+  const worktreePaths = new Set<string>();
+  if (task.worktree_path) worktreePaths.add(task.worktree_path);
+  worktreePaths.add(worktreePathForTask(gitRoot, projectId, task.id));
+
+  for (const wt of worktreePaths) {
+    if (!wt) continue;
+    const removal = removeTaskWorktree(gitRoot, wt);
+    if (!removal.ok && fs.existsSync(wt)) {
+      if (options.force) {
+        warnings.push(removal.error ?? `無法移除 worktree：${wt}`);
+      } else {
+        throw new ValidationError(removal.error ?? '無法移除 worktree');
+      }
+    }
+  }
+
+  const branchCandidates = new Set<string>();
+  if (task.git_branch) branchCandidates.add(task.git_branch);
+  branchCandidates.add(taskBranchName(task.id));
+
+  for (const branch of branchCandidates) {
+    if (!localBranchExists(gitRoot, branch)) continue;
+    const deletion = forceDeleteLocalBranch(gitRoot, branch);
+    if (!deletion.ok) {
+      if (options.force) {
+        warnings.push(deletion.error);
+      } else {
+        throw new ValidationError(deletion.error);
+      }
+    }
+  }
+
+  return warnings;
+}
+
+export async function deleteTask(
+  projectId: string,
+  taskId: string,
+  options: { force?: boolean } = {},
+) {
+  const project = getProject(projectId);
+  const filePath = getTaskFilePath(project.workspacePath, taskId);
+  if (!fs.existsSync(filePath)) {
+    throw new NotFoundError('任務不存在');
+  }
+
+  const { frontmatter } = readTaskFile(filePath);
+  if (frontmatter.status === 'in_progress') {
+    throw new ValidationError('處理中的任務無法刪除，請先取消任務或等待 Agent 完成');
+  }
+
+  const taskUid = frontmatter.uid;
+  await stopPreview(taskUid).catch(() => undefined);
+  if (process.platform === 'win32') {
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  return withWriteLock(project.workspacePath, () => {
+    let warnings: string[] = [];
+    if (project.gitRoot) {
+      warnings = cleanupTaskGitForDelete(
+        project.gitRoot,
+        projectId,
+        {
+          id: taskId,
+          git_branch: frontmatter.git_branch,
+          worktree_path: frontmatter.worktree_path,
+        },
+        { force: options.force },
+      );
+    }
+
+    const commentsPath = getCommentsFilePath(project.workspacePath, taskId);
+    if (fs.existsSync(commentsPath)) {
+      fs.unlinkSync(commentsPath);
+    }
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+
+    const db = getDb();
+    db.delete(schema.previewServers).where(eq(schema.previewServers.taskUid, taskUid)).run();
+    db.delete(schema.leases).where(eq(schema.leases.taskUid, taskUid)).run();
+    db.delete(schema.comments)
+      .where(and(eq(schema.comments.projectId, projectId), eq(schema.comments.taskId, taskId)))
+      .run();
+    db.delete(schema.activityLogs)
+      .where(and(eq(schema.activityLogs.projectId, projectId), eq(schema.activityLogs.taskId, taskId)))
+      .run();
+    db.delete(schema.tasks).where(eq(schema.tasks.uid, taskUid)).run();
+
+    return { deleted: true, id: taskId, warnings: warnings.length > 0 ? warnings : undefined };
+  });
+}
+
+function worktreeBaseDirForProject(gitRoot: string, projectId: string): string {
+  const parent = path.dirname(gitRoot);
+  const shortId = projectId.replace(/-/g, '').slice(0, 8);
+  return path.join(parent, '.pm-ai-worktrees', shortId);
+}
+
+function removePathOrWarn(
+  targetPath: string,
+  options: { force?: boolean; label?: string },
+): string | null {
+  const resolved = path.resolve(targetPath);
+  if (!fs.existsSync(resolved)) return null;
+
+  const rmOpts: fs.RmOptions = {
+    recursive: true,
+    force: true,
+    maxRetries: process.platform === 'win32' ? 8 : 3,
+    retryDelay: process.platform === 'win32' ? 300 : 100,
+  };
+
+  const fail = (err: unknown): string | null => {
+    const message = err instanceof Error ? err.message : String(err);
+    const label = options.label ?? resolved;
+    const text = `無法刪除 ${label}：${message}`;
+    if (options.force) return text;
+    throw new ValidationError(text);
+  };
+
+  try {
+    fs.rmSync(resolved, rmOpts);
+    return null;
+  } catch (err) {
+    if (process.platform !== 'win32') return fail(err);
+  }
+
+  try {
+    const trash = `${resolved}.pm-ai-del-${Date.now()}`;
+    fs.renameSync(resolved, trash);
+    fs.rmSync(trash, rmOpts);
+    return null;
+  } catch (err) {
+    return fail(err);
+  }
+}
+
+interface TaskDeleteSnapshot {
+  id: string;
+  uid: string;
+  status: string;
+  git_branch?: string | null;
+  worktree_path?: string | null;
+}
+
+function collectTasksForProjectDelete(projectId: string, workspacePath: string): TaskDeleteSnapshot[] {
+  const byId = new Map<string, TaskDeleteSnapshot>();
+
+  if (fs.existsSync(workspacePath) && checkProjectBinding(workspacePath) === 'ok') {
+    for (const filePath of listTaskFiles(workspacePath)) {
+      try {
+        const { frontmatter } = readTaskFile(filePath);
+        byId.set(frontmatter.id, {
+          id: frontmatter.id,
+          uid: frontmatter.uid,
+          status: frontmatter.status,
+          git_branch: frontmatter.git_branch,
+          worktree_path: frontmatter.worktree_path,
+        });
+      } catch {
+        // skip malformed task files
+      }
+    }
+  }
+
+  const db = getDb();
+  const rows = db.select().from(schema.tasks).where(eq(schema.tasks.projectId, projectId)).all();
+  for (const row of rows) {
+    if (!byId.has(row.id)) {
+      byId.set(row.id, {
+        id: row.id,
+        uid: row.uid,
+        status: row.status,
+      });
+    }
+  }
+
+  return [...byId.values()];
+}
+
+export async function deleteProject(projectId: string, options: { force?: boolean } = {}) {
+  const project = getProject(projectId);
+  const tasksToClean = collectTasksForProjectDelete(projectId, project.workspacePath);
+
+  const inProgress = tasksToClean.filter((task) => task.status === 'in_progress');
+  if (inProgress.length > 0) {
+    throw new ValidationError(
+      `有 ${inProgress.length} 個處理中的任務，請先取消或等待完成後再刪除專案`,
+    );
+  }
+
+  await stopPreviewsForProject(projectId);
+  if (process.platform === 'win32') {
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  const runDelete = () => {
+    const warnings: string[] = [];
+
+    if (project.gitRoot) {
+      for (const task of tasksToClean) {
+        warnings.push(
+          ...cleanupTaskGitForDelete(project.gitRoot!, projectId, task, { force: options.force }),
+        );
+      }
+
+      const wtBase = worktreeBaseDirForProject(project.gitRoot, projectId);
+      const wtWarning = removePathOrWarn(wtBase, {
+        force: options.force,
+        label: `worktree 目錄 ${wtBase}`,
+      });
+      if (wtWarning) warnings.push(wtWarning);
+      runGit(project.gitRoot, ['worktree', 'prune']);
+    }
+
+    const pmAiDir = getPmAiDir(project.workspacePath);
+    const pmAiWarning = removePathOrWarn(pmAiDir, {
+      force: options.force,
+      label: `workspace 資料目錄 ${pmAiDir}`,
+    });
+    if (pmAiWarning) warnings.push(pmAiWarning);
+
+    const db = getDb();
+    db.delete(schema.previewServers).where(eq(schema.previewServers.projectId, projectId)).run();
+
+    const taskUids = tasksToClean.map((task) => task.uid);
+    if (taskUids.length > 0) {
+      db.delete(schema.leases).where(inArray(schema.leases.taskUid, taskUids)).run();
+    }
+
+    db.delete(schema.comments).where(eq(schema.comments.projectId, projectId)).run();
+    db.delete(schema.activityLogs).where(eq(schema.activityLogs.projectId, projectId)).run();
+    db.delete(schema.tasks).where(eq(schema.tasks.projectId, projectId)).run();
+    db.delete(schema.projects).where(eq(schema.projects.id, projectId)).run();
+
+    return {
+      deleted: true,
+      id: projectId,
+      warnings: warnings.length > 0 ? warnings : undefined,
+    };
+  };
+
+  if (fs.existsSync(project.workspacePath)) {
+    return withWriteLock(project.workspacePath, runDelete);
+  }
+  return runDelete();
 }

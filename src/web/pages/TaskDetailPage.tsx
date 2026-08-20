@@ -21,6 +21,8 @@ export function TaskDetailPage() {
   const [showReject, setShowReject] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
   const [showCancel, setShowCancel] = useState(false);
+  const [showDelete, setShowDelete] = useState(false);
+  const [forceDelete, setForceDelete] = useState(false);
   const [cancelReason, setCancelReason] = useState('');
   const [commentDraft, setCommentDraft] = useState('');
   const [commentSending, setCommentSending] = useState(false);
@@ -196,6 +198,11 @@ export function TaskDetailPage() {
             onClick={() => doAction('unlock', () => tasksApi.unlock(projectId!, taskId!))}
           >
             強制解鎖
+          </Button>
+        )}
+        {task.status !== 'in_progress' && (
+          <Button variant="destructive" onClick={() => { setForceDelete(false); setShowDelete(true); }}>
+            刪除任務
           </Button>
         )}
       </div>
@@ -493,6 +500,64 @@ export function TaskDetailPage() {
               }}
             >
               確認取消
+            </Button>
+          </div>
+        </div>
+      </Dialog>
+
+      <Dialog open={showDelete} onClose={() => setShowDelete(false)} title="刪除任務">
+        <div className="flex flex-col gap-3">
+          <p className="text-sm text-muted-foreground">
+            將永久刪除任務 <span className="font-mono">{task.id}</span> 及其評論、活動記錄。
+            {(task.git_branch || task.worktree_path || task.use_isolation) && (
+              <>
+                {' '}
+                若已建立 Git 隔離，會一併移除 worktree 與任務分支（
+                <span className="font-mono">{task.git_branch ?? `pm-ai/${task.id}`}</span>）。
+              </>
+            )}
+          </p>
+          {(task.git_branch || task.worktree_path || task.use_isolation) && (
+            <label className="flex items-start gap-2 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4"
+                checked={forceDelete}
+                onChange={(e) => setForceDelete(e.target.checked)}
+              />
+              <span>
+                強制刪除：若 worktree 被 Cursor 或 dev server 占用無法刪除，仍移除任務記錄（目錄需稍後手動清理）
+              </span>
+            </label>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setShowDelete(false)}>
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={!!actionLoading}
+              onClick={async () => {
+                if (!projectId || !taskId) return;
+                setActionLoading('delete');
+                setError('');
+                try {
+                  const result = await tasksApi.delete(projectId, taskId, { force: forceDelete });
+                  if (result.warnings?.length) {
+                    toast.warning(result.warnings.join(' '));
+                  } else {
+                    toast.success('任務已刪除');
+                  }
+                  navigate(`/projects/${projectId}/tasks`);
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : '刪除失敗');
+                  setShowDelete(false);
+                } finally {
+                  setActionLoading('');
+                }
+              }}
+            >
+              {actionLoading === 'delete' ? '刪除中…' : '確認刪除'}
             </Button>
           </div>
         </div>

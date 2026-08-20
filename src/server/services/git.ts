@@ -163,6 +163,83 @@ export function ensureTaskWorktree(
   }
 }
 
+function gitWorktreePath(worktreePath: string): string {
+  const resolved = path.resolve(worktreePath);
+  return process.platform === 'win32' ? resolved.replace(/\\/g, '/') : resolved;
+}
+
+function formatWorktreeDeleteError(worktreePath: string, err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const code = err as NodeJS.ErrnoException;
+  const locked =
+    code.code === 'EPERM' ||
+    code.code === 'EBUSY' ||
+    code.code === 'EACCES' ||
+    /permission denied|being used by another process|Invalid argument/i.test(message);
+
+  if (locked) {
+    return (
+      `無法刪除 worktree 目錄（可能被 Cursor 或 dev server 占用）：${worktreePath}。` +
+      '請先關閉該 worktree 的 Cursor 視窗、停止調試預覽後重試；' +
+      '或在刪除對話框勾選「強制刪除」僅移除任務記錄。'
+    );
+  }
+  return message;
+}
+
+function forceRemoveWorktreeDirectory(
+  gitRoot: string,
+  worktreePath: string,
+): { ok: boolean; error?: string } {
+  const resolved = path.resolve(worktreePath);
+  if (!fs.existsSync(resolved)) {
+    runGit(gitRoot, ['worktree', 'prune']);
+    return { ok: true };
+  }
+
+  const gitFile = path.join(resolved, '.git');
+  try {
+    if (fs.existsSync(gitFile)) {
+      const stat = fs.statSync(gitFile);
+      if (stat.isFile()) {
+        fs.unlinkSync(gitFile);
+      }
+    }
+  } catch {
+    // continue with directory removal attempts
+  }
+
+  const rmOpts: fs.RmOptions = {
+    recursive: true,
+    force: true,
+    maxRetries: process.platform === 'win32' ? 8 : 3,
+    retryDelay: process.platform === 'win32' ? 300 : 100,
+  };
+
+  try {
+    fs.rmSync(resolved, rmOpts);
+    runGit(gitRoot, ['worktree', 'prune']);
+    return { ok: true };
+  } catch (err) {
+    if (process.platform !== 'win32') {
+      return { ok: false, error: formatWorktreeDeleteError(resolved, err) };
+    }
+  }
+
+  try {
+    const trash = `${resolved}.pm-ai-del-${Date.now()}`;
+    fs.renameSync(resolved, trash);
+    fs.rmSync(trash, rmOpts);
+    runGit(gitRoot, ['worktree', 'prune']);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error: formatWorktreeDeleteError(resolved, err),
+    };
+  }
+}
+
 export function removeTaskWorktree(
   gitRoot: string,
   worktreePath: string,
@@ -171,23 +248,39 @@ export function removeTaskWorktree(
     return { ok: true };
   }
 
-  const result = runGit(gitRoot, ['worktree', 'remove', worktreePath, '--force']);
-  if (result.code !== 0) {
-    if (fs.existsSync(worktreePath)) {
-      try {
-        fs.rmSync(worktreePath, { recursive: true, force: true });
-        runGit(gitRoot, ['worktree', 'prune']);
-        return { ok: true };
-      } catch {
-        return { ok: false, error: result.stderr || result.stdout || '無法移除 worktree' };
-      }
-    }
-    runGit(gitRoot, ['worktree', 'prune']);
+  const root = path.resolve(gitRoot);
+  const resolved = path.resolve(worktreePath);
+  const registered = worktreeRegistered(root, resolved);
+
+  if (!fs.existsSync(resolved) && !registered) {
+    runGit(root, ['worktree', 'prune']);
     return { ok: true };
   }
 
-  runGit(gitRoot, ['worktree', 'prune']);
-  return { ok: true };
+  if (!registered) {
+    return forceRemoveWorktreeDirectory(root, resolved);
+  }
+
+  const gitPath = gitWorktreePath(resolved);
+  const result = runGit(root, ['worktree', 'remove', gitPath, '--force']);
+  if (result.code === 0) {
+    runGit(root, ['worktree', 'prune']);
+    if (fs.existsSync(resolved)) {
+      return forceRemoveWorktreeDirectory(root, resolved);
+    }
+    return { ok: true };
+  }
+
+  const manual = forceRemoveWorktreeDirectory(root, resolved);
+  if (manual.ok) {
+    return { ok: true };
+  }
+
+  const gitMsg = result.stderr || result.stdout;
+  return {
+    ok: false,
+    error: manual.error ?? gitMsg ?? '無法移除 worktree',
+  };
 }
 
 export function openInCursor(targetPath: string): Promise<void> {
@@ -611,6 +704,37 @@ export function deleteLocalBranch(
   }
 
   const result = runGit(gitRoot, ['branch', '-d', name]);
+  if (result.code !== 0) {
+    return { ok: false, error: result.stderr || result.stdout || '無法刪除分支' };
+  }
+  return { ok: true };
+}
+
+export function forceDeleteLocalBranch(
+  gitRoot: string,
+  branch: string,
+): { ok: true } | { ok: false; error: string } {
+  const name = assertBranchName(branch);
+  if (!localBranchExists(gitRoot, name)) {
+    return { ok: true };
+  }
+
+  const branches = listLocalBranches(gitRoot);
+  const info = branches.find((b) => b.name === name);
+  if (info?.worktreePath) {
+    return {
+      ok: false,
+      error: `分支 ${name} 仍在 worktree 中使用，請先刪除 worktree`,
+    };
+  }
+  if (info?.checkedOutHere) {
+    return {
+      ok: false,
+      error: `分支 ${name} 目前在主 workspace checkout，請先切換到其他分支`,
+    };
+  }
+
+  const result = runGit(gitRoot, ['branch', '-D', name]);
   if (result.code !== 0) {
     return { ok: false, error: result.stderr || result.stdout || '無法刪除分支' };
   }

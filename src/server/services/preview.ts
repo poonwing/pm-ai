@@ -605,6 +605,16 @@ export async function stopAllPreviews(): Promise<void> {
   await Promise.all(rows.map((row) => stopPreview(row.taskUid)));
 }
 
+export async function stopPreviewsForProject(projectId: string): Promise<void> {
+  const db = getDb();
+  const rows = db
+    .select()
+    .from(schema.previewServers)
+    .where(eq(schema.previewServers.projectId, projectId))
+    .all();
+  await Promise.all(rows.map((row) => stopPreview(row.taskUid)));
+}
+
 export function attachPreviewToTask<T extends { uid: string }>(task: T): T & { preview: PreviewInfo } {
   return { ...task, preview: getPreviewStatus(task.uid) };
 }

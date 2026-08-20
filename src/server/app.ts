@@ -235,6 +235,16 @@ app.patch('/api/v1/projects/:id', authMiddleware('human'), zValidator('json', Up
   }
 });
 
+app.delete('/api/v1/projects/:id', authMiddleware('human'), async (c) => {
+  try {
+    const force = c.req.query('force') === '1' || c.req.query('force') === 'true';
+    const result = await taskService.deleteProject(requireParam(c, 'id'), { force });
+    return c.json(result);
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
 app.post('/api/v1/projects/:id/relocate', authMiddleware('human'), zValidator('json', RelocateProjectSchema), (c) => {
   try {
     const body = c.req.valid('json');
@@ -411,6 +421,18 @@ app.post('/api/v1/tasks/:id/unlock', authMiddleware('human'), (c) => {
     const projectId = c.req.query('project_id');
     if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
     return c.json(taskService.forceUnlockTask(projectId, requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.delete('/api/v1/tasks/:id', authMiddleware('human'), async (c) => {
+  try {
+    const projectId = c.req.query('project_id');
+    if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
+    const force = c.req.query('force') === '1' || c.req.query('force') === 'true';
+    const result = await taskService.deleteTask(projectId, requireParam(c, 'id'), { force });
+    return c.json(result);
   } catch (err) {
     return errorResponse(c, err);
   }

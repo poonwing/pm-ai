@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { useParams, useOutletContext } from 'react-router-dom';
+import { useParams, useOutletContext, useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import { projectsApi, configApi, dialogsApi, Project } from '../lib/api';
-import { Button, Input, Label, Textarea } from '../components/ui';
+import { Button, Input, Label, Textarea, Dialog } from '../components/ui';
 
 interface OutletContext {
   reloadProjects: () => void;
@@ -9,8 +10,12 @@ interface OutletContext {
 
 export function ProjectSettingsPage() {
   const { projectId } = useParams<{ projectId: string }>();
+  const navigate = useNavigate();
   const { reloadProjects } = useOutletContext<OutletContext>();
   const [project, setProject] = useState<Project | null>(null);
+  const [showDelete, setShowDelete] = useState(false);
+  const [forceDelete, setForceDelete] = useState(false);
+  const [deleteLoading, setDeleteLoading] = useState(false);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [newPath, setNewPath] = useState('');
@@ -243,11 +248,81 @@ export function ProjectSettingsPage() {
 
       <hr className="border-border" />
 
-      <div>
-        <Button variant="destructive" onClick={archive}>
-          封存專案
-        </Button>
+      <div className="flex flex-col gap-3">
+        <h2 className="text-sm font-semibold text-red-700">危險操作</h2>
+        <p className="text-xs text-muted-foreground">
+          封存僅隱藏專案；刪除會永久移除 PM-AI 中的專案、所有任務、worktree 與 workspace 內的{' '}
+          <code className="font-mono">.pm-ai/</code> 資料（不會刪除整個 workspace 資料夾）。
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" onClick={archive}>
+            封存專案
+          </Button>
+          <Button
+            variant="destructive"
+            onClick={() => {
+              setForceDelete(false);
+              setShowDelete(true);
+            }}
+          >
+            刪除專案
+          </Button>
+        </div>
       </div>
+
+      <Dialog open={showDelete} onClose={() => setShowDelete(false)} title="刪除專案">
+        <div className="flex flex-col gap-3">
+          <p className="text-sm text-muted-foreground">
+            將永久刪除專案 <span className="font-mono">{project.name}</span> 及其所有任務、評論、活動記錄。
+            若已使用 Git 隔離，會一併清理 worktree 與任務分支，並刪除 workspace 內的{' '}
+            <code className="font-mono">.pm-ai/</code> 目錄。
+          </p>
+          {project.gitRoot && (
+            <label className="flex items-start gap-2 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4"
+                checked={forceDelete}
+                onChange={(e) => setForceDelete(e.target.checked)}
+              />
+              <span>
+                強制刪除：若 worktree 被 Cursor 或 dev server 占用無法刪除，仍移除專案記錄（目錄需稍後手動清理）
+              </span>
+            </label>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setShowDelete(false)}>
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleteLoading}
+              onClick={async () => {
+                if (!projectId) return;
+                setDeleteLoading(true);
+                setError('');
+                try {
+                  const result = await projectsApi.delete(projectId, { force: forceDelete });
+                  await reloadProjects();
+                  if (result.warnings?.length) {
+                    toast.warning(result.warnings.join(' '));
+                  } else {
+                    toast.success('專案已刪除');
+                  }
+                  navigate('/');
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : '刪除失敗');
+                  setShowDelete(false);
+                } finally {
+                  setDeleteLoading(false);
+                }
+              }}
+            >
+              {deleteLoading ? '刪除中…' : '確認刪除'}
+            </Button>
+          </div>
+        </div>
+      </Dialog>
     </div>
   );
 }

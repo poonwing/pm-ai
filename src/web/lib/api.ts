@@ -285,6 +285,15 @@ export const projectsApi = {
       { method: 'POST' },
     ),
   dashboard: (id: string) => api<Dashboard>(`/projects/${id}/dashboard`),
+  delete: (id: string, options?: { force?: boolean }) => {
+    const params = new URLSearchParams();
+    if (options?.force) params.set('force', '1');
+    const qs = params.toString();
+    return api<{ deleted: boolean; id: string; warnings?: string[] }>(
+      `/projects/${id}${qs ? `?${qs}` : ''}`,
+      { method: 'DELETE' },
+    );
+  },
   getGit: (id: string) => api<WorkspaceGitStatus>(`/projects/${id}/git`),
   checkoutBranch: (id: string, branch: string) =>
     api<WorkspaceGitStatus>(`/projects/${id}/git/checkout`, {
@@ -335,6 +344,14 @@ export const tasksApi = {
     }),
   reopen: (projectId: string, taskId: string) =>
     api<Task>(`/tasks/${taskId}/reopen?project_id=${projectId}`, { method: 'POST' }),
+  delete: (projectId: string, taskId: string, options?: { force?: boolean }) => {
+    const params = new URLSearchParams({ project_id: projectId });
+    if (options?.force) params.set('force', '1');
+    return api<{ deleted: boolean; id: string; warnings?: string[] }>(
+      `/tasks/${taskId}?${params.toString()}`,
+      { method: 'DELETE' },
+    );
+  },
   approve: (projectId: string, taskId: string) =>
     api<Task>(`/tasks/${taskId}/review/approve?project_id=${projectId}`, { method: 'POST' }),
   reject: (projectId: string, taskId: string, reason: string) =>
