@@ -516,6 +516,26 @@ app.post('/api/v1/tasks/:id/git/restore-worktree', authMiddleware('human'), (c) 
   }
 });
 
+app.post('/api/v1/tasks/:id/git/switch-temp-branch', authMiddleware('human'), (c) => {
+  try {
+    const projectId = c.req.query('project_id');
+    if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
+    return c.json(taskService.switchTaskWorktreeToTempBranch(projectId, requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post('/api/v1/tasks/:id/git/restore-task-branch', authMiddleware('human'), (c) => {
+  try {
+    const projectId = c.req.query('project_id');
+    if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
+    return c.json(taskService.restoreTaskWorktreeFromTempBranch(projectId, requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
 app.post('/api/v1/tasks/:id/isolation/open-cursor', authMiddleware('human'), async (c) => {
   try {
     const projectId = c.req.query('project_id');

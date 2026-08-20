@@ -31,6 +31,54 @@ export function taskBranchName(taskId: string): string {
   return `pm-ai/${taskId}`;
 }
 
+export function taskTempBranchName(taskId: string): string {
+  return `pm-ai/tmp/${taskId}`;
+}
+
+export function getCurrentBranchAt(repoPath: string): string | null {
+  const result = runGit(repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (result.code !== 0) return null;
+  if (result.stdout === 'HEAD') return null;
+  return result.stdout;
+}
+
+export function createBranchAt(
+  gitRoot: string,
+  newBranch: string,
+  startRef: string,
+): { ok: true } | { ok: false; error: string } {
+  const name = assertBranchName(newBranch);
+  if (localBranchExists(gitRoot, name)) {
+    return { ok: true };
+  }
+  const result = runGit(gitRoot, ['branch', name, startRef]);
+  if (result.code !== 0) {
+    return { ok: false, error: result.stderr || result.stdout || '無法建立分支' };
+  }
+  return { ok: true };
+}
+
+export function switchBranchAt(
+  repoPath: string,
+  branch: string,
+): { ok: true; branch: string } | { ok: false; error: string } {
+  const name = assertBranchName(branch);
+  const current = getCurrentBranchAt(repoPath);
+  if (current === name) {
+    return { ok: true, branch: name };
+  }
+
+  const result = runGit(repoPath, ['switch', name]);
+  if (result.code !== 0) {
+    const msg = result.stderr || result.stdout || 'git switch 失敗';
+    if (/already checked out/i.test(msg)) {
+      return { ok: false, error: `分支 ${name} 已在其他 worktree 中 checkout` };
+    }
+    return { ok: false, error: msg };
+  }
+  return { ok: true, branch: name };
+}
+
 export function worktreePathForTask(gitRoot: string, projectId: string, taskId: string): string {
   const parent = path.dirname(gitRoot);
   const shortId = projectId.replace(/-/g, '').slice(0, 8);

@@ -55,6 +55,12 @@ import {
   listLocalBranches,
   hasUncommittedChanges,
   runGit,
+  taskTempBranchName,
+  getCurrentBranchAt,
+  createBranchAt,
+  switchBranchAt,
+  getHeadSha,
+  getCurrentBranch,
 } from './git.js';
 import { getPmAiDir } from '../paths.js';
 import { installPmAiSkill } from './skill-install.js';
@@ -867,6 +873,7 @@ export function reopenTask(projectId: string, taskId: string) {
 export function approveReview(projectId: string, taskId: string) {
   const task = getTask(projectId, taskId);
   if (!isPendingReview(task)) throw new ValidationError('此任務不在待驗收狀態');
+  assertTaskWorktreeNotOnTempBranch(projectId, taskId);
 
   return updateTaskInternal(
     projectId,
@@ -890,6 +897,7 @@ export function approveReview(projectId: string, taskId: string) {
 export function rejectReview(projectId: string, taskId: string, reason: string) {
   const task = getTask(projectId, taskId);
   if (!isPendingReview(task)) throw new ValidationError('此任務不在待驗收狀態');
+  assertTaskWorktreeNotOnTempBranch(projectId, taskId);
 
   return transitionTask(projectId, taskId, 'todo', 'human', undefined, {
     reason,
@@ -1287,6 +1295,21 @@ function worktreeStillActive(
   return worktreePathExists(gitRoot, task.worktree_path);
 }
 
+function assertTaskWorktreeNotOnTempBranch(projectId: string, taskId: string): void {
+  const project = getProject(projectId);
+  const task = getTask(projectId, taskId);
+  if (!project.gitRoot || !task.worktree_path) return;
+  if (!worktreeStillActive(project.gitRoot, task)) return;
+
+  const tempBranch = taskTempBranchName(taskId);
+  const current = getCurrentBranchAt(task.worktree_path);
+  if (current === tempBranch) {
+    throw new ValidationError(
+      `worktree 目前在臨時分支 ${tempBranch}。請先在任務詳情點「恢復任務分支」後再操作。`,
+    );
+  }
+}
+
 export function getTaskGitStatus(projectId: string, taskId: string): TaskGitStatus {
   const project = getProject(projectId);
   const task = getTask(projectId, taskId);
@@ -1315,6 +1338,13 @@ export function getTaskGitStatus(projectId: string, taskId: string): TaskGitStat
       remove_worktree_block_reason: '此專案未偵測到 git 倉庫',
       delete_branch_block_reason: '此專案未偵測到 git 倉庫',
       restore_worktree_block_reason: '此專案未偵測到 git 倉庫',
+      worktree_current_branch: null,
+      temp_branch: null,
+      on_temp_branch: false,
+      can_switch_temp_branch: false,
+      can_restore_task_branch: false,
+      switch_temp_block_reason: '此專案未偵測到 git 倉庫',
+      restore_task_block_reason: '此專案未偵測到 git 倉庫',
     };
   }
 
@@ -1402,6 +1432,47 @@ export function getTaskGitStatus(projectId: string, taskId: string): TaskGitStat
     }
   }
 
+  const tempBranch = taskTempBranchName(taskId);
+  const worktreeCurrentBranch =
+    worktreeExists && worktreePath ? getCurrentBranchAt(worktreePath) : null;
+  const onTempBranch = worktreeCurrentBranch === tempBranch;
+  const workspaceCurrentBranch = getCurrentBranch(gitRoot);
+
+  let canSwitchTempBranch = false;
+  let switchTempBlockReason: string | null = null;
+  if (!worktreeExists || !worktreePath) {
+    switchTempBlockReason = 'worktree 不存在或未就緒';
+  } else if (task.isolation_status !== 'ready') {
+    switchTempBlockReason = 'worktree 未就緒';
+  } else if (!branch || !branchExists) {
+    switchTempBlockReason = '任務分支不存在';
+  } else if (onTempBranch) {
+    switchTempBlockReason = '已在臨時分支上';
+  } else if (worktreeCurrentBranch !== branch) {
+    switchTempBlockReason = `worktree 目前在 ${worktreeCurrentBranch ?? '未知分支'}，請先切回任務分支`;
+  } else {
+    canSwitchTempBranch = true;
+  }
+
+  let canRestoreTaskBranch = false;
+  let restoreTaskBlockReason: string | null = null;
+  if (!worktreeExists || !worktreePath) {
+    restoreTaskBlockReason = 'worktree 不存在或未就緒';
+  } else if (!onTempBranch) {
+    restoreTaskBlockReason = 'worktree 不在臨時分支上';
+  } else if (!branch || !branchExists) {
+    restoreTaskBlockReason = '任務分支不存在';
+  } else if (workspaceCurrentBranch === branch) {
+    restoreTaskBlockReason = '請先在專案總覽將主 workspace 切離任務分支';
+  } else {
+    const branchInfo = listLocalBranches(gitRoot).find((b) => b.name === branch);
+    if (branchInfo?.worktreePath && path.resolve(branchInfo.worktreePath) !== path.resolve(worktreePath)) {
+      restoreTaskBlockReason = `任務分支已在其他 worktree 中：${branchInfo.worktreePath}`;
+    } else {
+      canRestoreTaskBranch = true;
+    }
+  }
+
   return {
     available: true,
     branch,
@@ -1422,7 +1493,86 @@ export function getTaskGitStatus(projectId: string, taskId: string): TaskGitStat
     remove_worktree_block_reason: removeWorktreeBlockReason,
     delete_branch_block_reason: deleteBranchBlockReason,
     restore_worktree_block_reason: restoreWorktreeBlockReason,
+    worktree_current_branch: worktreeCurrentBranch,
+    temp_branch: tempBranch,
+    on_temp_branch: onTempBranch,
+    can_switch_temp_branch: canSwitchTempBranch,
+    can_restore_task_branch: canRestoreTaskBranch,
+    switch_temp_block_reason: switchTempBlockReason,
+    restore_task_block_reason: restoreTaskBlockReason,
   };
+}
+
+export function switchTaskWorktreeToTempBranch(projectId: string, taskId: string): TaskGitStatus {
+  const project = getProject(projectId);
+  const task = getTask(projectId, taskId);
+
+  if (!project.gitRoot) {
+    throw new ValidationError('此專案未偵測到 git 倉庫');
+  }
+
+  const status = getTaskGitStatus(projectId, taskId);
+  if (status.on_temp_branch) {
+    return status;
+  }
+  if (!status.can_switch_temp_branch) {
+    throw new ValidationError(status.switch_temp_block_reason ?? '無法切換臨時分支');
+  }
+
+  const worktreePath = task.worktree_path!;
+  const tempBranch = taskTempBranchName(taskId);
+  const gitRoot = project.gitRoot;
+
+  if (!localBranchExists(gitRoot, tempBranch)) {
+    const head = getHeadSha(worktreePath);
+    if (!head) {
+      throw new ValidationError('無法讀取 worktree HEAD');
+    }
+    const created = createBranchAt(gitRoot, tempBranch, head);
+    if (!created.ok) {
+      throw new ValidationError(created.error);
+    }
+  }
+
+  const switched = switchBranchAt(worktreePath, tempBranch);
+  if (!switched.ok) {
+    throw new ValidationError(switched.error);
+  }
+
+  return getTaskGitStatus(projectId, taskId);
+}
+
+export function restoreTaskWorktreeFromTempBranch(projectId: string, taskId: string): TaskGitStatus {
+  const project = getProject(projectId);
+  const task = getTask(projectId, taskId);
+
+  if (!project.gitRoot) {
+    throw new ValidationError('此專案未偵測到 git 倉庫');
+  }
+
+  const status = getTaskGitStatus(projectId, taskId);
+  if (!status.can_restore_task_branch) {
+    throw new ValidationError(status.restore_task_block_reason ?? '無法恢復任務分支');
+  }
+
+  const worktreePath = task.worktree_path!;
+  const taskBranch = task.git_branch ?? taskBranchName(taskId);
+  const tempBranch = taskTempBranchName(taskId);
+  const gitRoot = project.gitRoot;
+
+  const switched = switchBranchAt(worktreePath, taskBranch);
+  if (!switched.ok) {
+    throw new ValidationError(switched.error);
+  }
+
+  if (localBranchExists(gitRoot, tempBranch)) {
+    const deletion = forceDeleteLocalBranch(gitRoot, tempBranch);
+    if (!deletion.ok) {
+      throw new ValidationError(deletion.error);
+    }
+  }
+
+  return getTaskGitStatus(projectId, taskId);
 }
 
 export function mergeTaskBranch(
@@ -1617,6 +1767,7 @@ function cleanupTaskGitForDelete(
   const branchCandidates = new Set<string>();
   if (task.git_branch) branchCandidates.add(task.git_branch);
   branchCandidates.add(taskBranchName(task.id));
+  branchCandidates.add(taskTempBranchName(task.id));
 
   for (const branch of branchCandidates) {
     if (!localBranchExists(gitRoot, branch)) continue;

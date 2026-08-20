@@ -997,6 +997,52 @@ function IsolationPanel({
     }
   };
 
+  const handleSwitchTemp = async () => {
+    if (!gitStatus?.can_switch_temp_branch) return;
+    if (
+      gitStatus.worktree_dirty &&
+      !confirm('worktree 有未提交改動，切換分支會攜帶這些改動。確定繼續？')
+    ) {
+      return;
+    }
+    if (
+      task.status === 'in_progress' &&
+      !confirm('任務處理中，切換臨時分支可能影響 Agent。確定繼續？')
+    ) {
+      return;
+    }
+    setLocalLoading('switch-temp');
+    try {
+      const updated = await tasksApi.switchTempBranch(projectId, task.id);
+      setGitStatus(updated);
+      toast.success(`已切換到臨時分支 ${updated.temp_branch ?? ''}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '切換臨時分支失敗');
+    } finally {
+      setLocalLoading('');
+    }
+  };
+
+  const handleRestoreTask = async () => {
+    if (!gitStatus?.can_restore_task_branch) return;
+    if (
+      gitStatus.worktree_dirty &&
+      !confirm('worktree 有未提交改動，切換分支會攜帶這些改動。確定繼續？')
+    ) {
+      return;
+    }
+    setLocalLoading('restore-task');
+    try {
+      const updated = await tasksApi.restoreTaskBranch(projectId, task.id);
+      setGitStatus(updated);
+      toast.success(`已恢復任務分支 ${updated.branch ?? ''}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '恢復任務分支失敗');
+    } finally {
+      setLocalLoading('');
+    }
+  };
+
   const loading = actionLoading || localLoading;
 
   const primaryMergeTarget =
@@ -1031,6 +1077,17 @@ function IsolationPanel({
           <div className="flex justify-between gap-2">
             <dt className="text-muted-foreground shrink-0">Branch</dt>
             <dd className="font-mono text-right break-all">{task.git_branch}</dd>
+          </div>
+        )}
+        {gitStatus?.worktree_exists && gitStatus.worktree_current_branch && (
+          <div className="flex justify-between gap-2">
+            <dt className="text-muted-foreground shrink-0">Worktree 分支</dt>
+            <dd className="font-mono text-right break-all">
+              {gitStatus.worktree_current_branch}
+              {gitStatus.on_temp_branch && (
+                <span className="ml-1 text-amber-600 font-sans">（臨時）</span>
+              )}
+            </dd>
           </div>
         )}
         {gitStatus && primaryMergeTarget && (
@@ -1091,7 +1148,7 @@ function IsolationPanel({
           )}
           <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
             <div className="flex-1">
-              <Label className="text-xs">Merge 目標分支</Label>
+              <Label>Merge 目標分支</Label>
               <select
                 className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs font-mono"
                 value={mergeTarget}
@@ -1170,6 +1227,41 @@ function IsolationPanel({
               複製工作目錄
             </Button>
           </>
+        )}
+        {isReady && gitStatus?.worktree_exists && (
+          <div className="rounded-md border border-border bg-muted/30 p-3 space-y-2">
+            <p className="text-xs text-muted-foreground">
+              切換臨時分支後，可在專案總覽將主 workspace 切到任務分支進行調試；恢復前請先在總覽切離任務分支。
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!gitStatus.can_switch_temp_branch || loading === 'switch-temp'}
+                onClick={() => void handleSwitchTemp()}
+              >
+                {loading === 'switch-temp' ? '切換中…' : '切換臨時分支'}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!gitStatus.can_restore_task_branch || loading === 'restore-task'}
+                onClick={() => void handleRestoreTask()}
+              >
+                {loading === 'restore-task' ? '恢復中…' : '恢復任務分支'}
+              </Button>
+            </div>
+            {!gitStatus.can_switch_temp_branch &&
+              !gitStatus.on_temp_branch &&
+              gitStatus.switch_temp_block_reason && (
+                <p className="text-xs text-muted-foreground">{gitStatus.switch_temp_block_reason}</p>
+              )}
+            {gitStatus.on_temp_branch &&
+              !gitStatus.can_restore_task_branch &&
+              gitStatus.restore_task_block_reason && (
+                <p className="text-xs text-amber-700">{gitStatus.restore_task_block_reason}</p>
+              )}
+          </div>
         )}
         {(isFailed || (canManage && task.use_isolation && task.isolation_status === 'none')) && (
           <Button

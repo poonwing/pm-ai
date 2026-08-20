@@ -313,6 +313,13 @@ export const TaskGitStatusSchema = z.object({
   remove_worktree_block_reason: z.string().nullable(),
   delete_branch_block_reason: z.string().nullable(),
   restore_worktree_block_reason: z.string().nullable(),
+  worktree_current_branch: z.string().nullable(),
+  temp_branch: z.string().nullable(),
+  on_temp_branch: z.boolean(),
+  can_switch_temp_branch: z.boolean(),
+  can_restore_task_branch: z.boolean(),
+  switch_temp_block_reason: z.string().nullable(),
+  restore_task_block_reason: z.string().nullable(),
 });
 
 export type TaskGitStatus = z.infer<typeof TaskGitStatusSchema>;

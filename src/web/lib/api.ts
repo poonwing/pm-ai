@@ -184,6 +184,13 @@ export interface TaskGitStatus {
   remove_worktree_block_reason: string | null;
   delete_branch_block_reason: string | null;
   restore_worktree_block_reason: string | null;
+  worktree_current_branch: string | null;
+  temp_branch: string | null;
+  on_temp_branch: boolean;
+  can_switch_temp_branch: boolean;
+  can_restore_task_branch: boolean;
+  switch_temp_block_reason: string | null;
+  restore_task_block_reason: string | null;
 }
 
 export interface TaskComment {
@@ -385,6 +392,14 @@ export const tasksApi = {
     api<Task>(`/tasks/${taskId}/git/delete-branch?project_id=${projectId}`, { method: 'POST' }),
   restoreWorktree: (projectId: string, taskId: string) =>
     api<Task>(`/tasks/${taskId}/git/restore-worktree?project_id=${projectId}`, { method: 'POST' }),
+  switchTempBranch: (projectId: string, taskId: string) =>
+    api<TaskGitStatus>(`/tasks/${taskId}/git/switch-temp-branch?project_id=${projectId}`, {
+      method: 'POST',
+    }),
+  restoreTaskBranch: (projectId: string, taskId: string) =>
+    api<TaskGitStatus>(`/tasks/${taskId}/git/restore-task-branch?project_id=${projectId}`, {
+      method: 'POST',
+    }),
   openInCursor: (projectId: string, taskId: string) =>
     api<{ opened: string }>(`/tasks/${taskId}/isolation/open-cursor?project_id=${projectId}`, {
       method: 'POST',
