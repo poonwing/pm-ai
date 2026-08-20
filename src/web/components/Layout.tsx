@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { Link, NavLink, Outlet, useParams, useNavigate } from 'react-router-dom';
 import { projectsApi, activityApi, Project } from '../lib/api';
 import { Button } from './ui';
+import { WorkspaceBranchSwitcher } from './WorkspaceBranchSwitcher';
 import { formatRelativeTime } from '../lib/utils';
 
 export function Layout() {
@@ -77,6 +78,9 @@ export function Layout() {
           )}
         </div>
         <div className="flex items-center gap-3">
+          {projectId && currentProject?.gitRoot && (
+            <WorkspaceBranchSwitcher projectId={projectId} />
+          )}
           <div
             className="flex items-center gap-1.5"
             title={lastActivity ? `最後活動：${formatRelativeTime(lastActivity)}` : '無近期活動'}

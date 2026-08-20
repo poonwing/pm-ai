@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { projectsApi, Dashboard, Project, WorkspaceGitStatus } from '../lib/api';
-import { Button, Card, Badge, Label } from '../components/ui';
+import { projectsApi, Dashboard, Project } from '../lib/api';
+import { Button, Card, Badge } from '../components/ui';
 import { formatRelativeTime, statusLabel, statusColor } from '../lib/utils';
 
 export function ProjectDashboardPage() {
@@ -65,10 +65,6 @@ export function ProjectDashboardPage() {
           <Button>新增任務</Button>
         </Link>
       </div>
-
-      {project.gitRoot && projectId && (
-        <WorkspaceBranchPanel projectId={projectId} gitRoot={project.gitRoot} />
-      )}
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {[
@@ -161,137 +157,5 @@ export function ProjectDashboardPage() {
         </Card>
       )}
     </div>
-  );
-}
-
-function WorkspaceBranchPanel({
-  projectId,
-  gitRoot,
-}: {
-  projectId: string;
-  gitRoot: string;
-}) {
-  const [gitStatus, setGitStatus] = useState<WorkspaceGitStatus | null>(null);
-  const [selectedBranch, setSelectedBranch] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [switching, setSwitching] = useState(false);
-  const [error, setError] = useState('');
-  const [message, setMessage] = useState('');
-
-  const loadGit = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const status = await projectsApi.getGit(projectId);
-      setGitStatus(status);
-      const current = status.current_branch ?? '';
-      setSelectedBranch((prev) => {
-        if (prev && status.branches.some((b) => b.name === prev && b.selectable)) return prev;
-        const firstSelectable = status.branches.find((b) => b.selectable)?.name ?? current;
-        return firstSelectable || current;
-      });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '載入 git 狀態失敗');
-    } finally {
-      setLoading(false);
-    }
-  }, [projectId]);
-
-  useEffect(() => {
-    void loadGit();
-  }, [loadGit]);
-
-  const handleCheckout = async () => {
-    if (!selectedBranch || !gitStatus) return;
-    const target = gitStatus.branches.find((b) => b.name === selectedBranch);
-    if (!target?.selectable) return;
-    if (target.current) {
-      setMessage('已在該分支上');
-      setTimeout(() => setMessage(''), 2000);
-      return;
-    }
-    if (
-      gitStatus.dirty &&
-      !confirm('主 workspace 有未提交變更，切換分支可能失敗或造成衝突。確定要切換？')
-    ) {
-      return;
-    }
-
-    setSwitching(true);
-    setError('');
-    setMessage('');
-    try {
-      const updated = await projectsApi.checkoutBranch(projectId, selectedBranch);
-      setGitStatus(updated);
-      setSelectedBranch(updated.current_branch ?? selectedBranch);
-      setMessage(`已切換到 ${updated.current_branch ?? selectedBranch}`);
-      setTimeout(() => setMessage(''), 3000);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '切換分支失敗');
-    } finally {
-      setSwitching(false);
-    }
-  };
-
-  if (loading) {
-    return (
-      <Card className="p-4">
-        <p className="text-sm text-muted-foreground">載入 git 分支…</p>
-      </Card>
-    );
-  }
-
-  if (!gitStatus?.available) {
-    return null;
-  }
-
-  return (
-    <Card className="p-4">
-      <div className="flex flex-col gap-3">
-        <div>
-          <h2 className="text-sm font-semibold">本機分支</h2>
-          <p className="text-xs text-muted-foreground mt-1">
-            切換主 workspace 的 git 分支以便本機調試（不影響任務 worktree）。
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="flex flex-col gap-1 min-w-[200px] flex-1">
-            <Label htmlFor="branch-select">目前：{gitStatus.current_branch ?? '（未知）'}</Label>
-            <select
-              id="branch-select"
-              value={selectedBranch}
-              onChange={(e) => setSelectedBranch(e.target.value)}
-              className="h-9 rounded-md border border-border bg-background px-3 text-sm font-mono"
-            >
-              {gitStatus.branches.map((b) => (
-                <option key={b.name} value={b.name} disabled={!b.selectable}>
-                  {b.name}
-                  {b.current ? ' (目前)' : ''}
-                  {b.worktree_path ? ' — 已在 worktree' : ''}
-                </option>
-              ))}
-            </select>
-          </div>
-          <Button
-            variant="outline"
-            disabled={switching || !selectedBranch}
-            onClick={() => void handleCheckout()}
-          >
-            {switching ? '切換中…' : '切換分支'}
-          </Button>
-          <Button variant="ghost" size="sm" onClick={() => void loadGit()}>
-            重新整理
-          </Button>
-        </div>
-
-        {gitStatus.dirty && (
-          <p className="text-xs text-amber-700">主 workspace 有未提交變更</p>
-        )}
-        {message && <p className="text-xs text-green-600">{message}</p>}
-        {error && <p className="text-xs text-red-600">{error}</p>}
-        <p className="text-[11px] text-muted-foreground font-mono break-all">{gitRoot}</p>
-      </div>
-    </Card>
   );
 }
