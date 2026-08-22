@@ -354,6 +354,7 @@ function getProjectPreviewFields(workspacePath: string) {
     previewInstallCommand: config?.preview_install_command ?? 'npm install',
     previewInstallIfNeeded: config?.preview_install_if_needed ?? true,
     previewWorkdir: config?.preview_workdir ?? '',
+    runMode: config?.run_mode ?? 'manual',
   };
 }
 
@@ -402,6 +403,7 @@ export function createProject(input: z.infer<typeof CreateProjectSchema>) {
       preview_install_command: DEFAULT_PREVIEW_INSTALL_COMMAND,
       preview_install_if_needed: true,
       preview_workdir: '',
+      run_mode: 'manual',
     };
     writeProjectConfig(normalizedPath, config);
   }
@@ -435,6 +437,7 @@ export function updateProject(
     preview_install_command?: string;
     preview_install_if_needed?: boolean;
     preview_workdir?: string;
+    run_mode?: 'manual' | 'auto';
   },
 ) {
   const project = getProject(projectId);
@@ -454,13 +457,17 @@ export function updateProject(
     if (updates.preview_workdir !== undefined) {
       config.preview_workdir = updates.preview_workdir;
     }
+    if (updates.run_mode !== undefined) {
+      config.run_mode = updates.run_mode;
+    }
     if (
       updates.name ||
       updates.description !== undefined ||
       updates.preview_command !== undefined ||
       updates.preview_install_command !== undefined ||
       updates.preview_install_if_needed !== undefined ||
-      updates.preview_workdir !== undefined
+      updates.preview_workdir !== undefined ||
+      updates.run_mode !== undefined
     ) {
       writeProjectConfig(project.workspacePath, config);
     }
@@ -668,6 +675,16 @@ export function createTask(
       use_isolation: input.use_isolation ?? false,
       merged_into: null,
       merged_at: null,
+      assignee_agent_id: input.assignee_agent_id ?? null,
+      assignee_name: input.assignee_name ?? null,
+      queue_order: input.queue_order ?? null,
+      review: {
+        required: input.review?.required ?? true,
+        reviewer_type: input.review?.reviewer_type ?? 'human',
+        reviewer_agent_id: input.review?.reviewer_agent_id ?? null,
+        status: input.review?.status ?? 'none',
+        note: input.review?.note ?? '',
+      },
     };
 
     const body = input.goal
@@ -768,6 +785,21 @@ export function updateTaskContent(
       if (input.constraints !== undefined) fm.constraints = input.constraints;
       if (input.agent_notes !== undefined) fm.agent_notes = input.agent_notes;
       if (input.use_isolation !== undefined) fm.use_isolation = input.use_isolation;
+      if (input.assignee_agent_id !== undefined) fm.assignee_agent_id = input.assignee_agent_id;
+      if (input.assignee_name !== undefined) fm.assignee_name = input.assignee_name;
+      if (input.queue_order !== undefined) fm.queue_order = input.queue_order;
+      if (input.review !== undefined) {
+        fm.review = {
+          required: input.review.required ?? fm.review?.required ?? true,
+          reviewer_type: input.review.reviewer_type ?? fm.review?.reviewer_type ?? 'human',
+          reviewer_agent_id:
+            input.review.reviewer_agent_id !== undefined
+              ? input.review.reviewer_agent_id
+              : (fm.review?.reviewer_agent_id ?? null),
+          status: input.review.status ?? fm.review?.status ?? 'none',
+          note: input.review.note ?? fm.review?.note ?? '',
+        };
+      }
       return { frontmatter: fm, body };
     },
     'human',
@@ -810,9 +842,23 @@ function transitionTask(
         fm.human_reviewed = opts.setHumanReviewed ?? false;
         if (opts.resultNote) fm.result_note = opts.resultNote;
         if (opts.artifacts) fm.artifacts = opts.artifacts;
+        const review = fm.review ?? {
+          required: true,
+          reviewer_type: 'human' as const,
+          reviewer_agent_id: null,
+          status: 'none' as const,
+          note: '',
+        };
+        if (!review.required || review.reviewer_type === 'none') {
+          fm.review = { ...review, status: 'approved', required: false, reviewer_type: review.reviewer_type === 'none' ? 'none' : review.reviewer_type };
+          if (review.reviewer_type === 'none') fm.human_reviewed = true;
+        } else {
+          fm.review = { ...review, status: 'pending' };
+        }
       } else if (fromStatus === 'done') {
         fm.completed_at = null;
         fm.human_reviewed = false;
+        if (fm.review) fm.review = { ...fm.review, status: 'none', note: '' };
       }
 
       if (opts.clearClaim) {
@@ -880,6 +926,16 @@ export function approveReview(projectId: string, taskId: string) {
     taskId,
     (fm, body) => {
       fm.human_reviewed = true;
+      fm.review = {
+        ...(fm.review ?? {
+          required: true,
+          reviewer_type: 'human',
+          reviewer_agent_id: null,
+          status: 'none',
+          note: '',
+        }),
+        status: 'approved',
+      };
       logActivity(
         getProject(projectId).workspacePath,
         projectId,
@@ -905,7 +961,11 @@ export function rejectReview(projectId: string, taskId: string, reason: string) 
   });
 }
 
-export function getInbox() {
+export function getInbox(filters?: {
+  assignee_agent_id?: string;
+  agent_name?: string;
+  project_id?: string;
+}) {
   const db = getDb();
   const todoTasks = db
     .select()
@@ -914,7 +974,31 @@ export function getInbox() {
     .orderBy(schema.tasks.createdAt)
     .all();
 
-  return todoTasks.map((row) => getTask(row.projectId, row.id));
+  let tasks = todoTasks.map((row) => getTask(row.projectId, row.id));
+  if (filters?.project_id) {
+    tasks = tasks.filter(
+      (t) => t.projectId === filters.project_id || t.project_id === filters.project_id,
+    );
+  }
+  if (filters?.assignee_agent_id) {
+    tasks = tasks.filter((t) => t.assignee_agent_id === filters.assignee_agent_id);
+  } else if (filters?.agent_name) {
+    tasks = tasks.filter(
+      (t) =>
+        !t.assignee_name ||
+        t.assignee_name === filters.agent_name ||
+        t.assignee_agent_id === filters.agent_name,
+    );
+  }
+  tasks.sort((a, b) => {
+    const ao = a.queue_order ?? Number.MAX_SAFE_INTEGER;
+    const bo = b.queue_order ?? Number.MAX_SAFE_INTEGER;
+    if (ao !== bo) return ao - bo;
+    return String(a.createdAt ?? a.created_at ?? '').localeCompare(
+      String(b.createdAt ?? b.created_at ?? ''),
+    );
+  });
+  return tasks;
 }
 
 export function claimTask(
@@ -1045,13 +1129,19 @@ export function completeTask(
     { actorName: agentName, summary: resultNote },
   );
 
-  return transitionTask(projectId, taskId, 'done', 'agent', agentName, {
+  const result = transitionTask(projectId, taskId, 'done', 'agent', agentName, {
     expectedVersion: task.version,
     resultNote,
     artifacts,
     clearClaim: true,
     setHumanReviewed: false,
   });
+
+  void import('../orchestrator/index.js')
+    .then((m) => m.onTaskEvent(projectId, taskId, 'completed'))
+    .catch(() => undefined);
+
+  return result;
 }
 
 export function releaseTask(

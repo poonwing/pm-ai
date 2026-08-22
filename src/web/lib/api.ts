@@ -76,6 +76,7 @@ export interface Project {
   previewInstallCommand?: string;
   previewInstallIfNeeded?: boolean;
   previewWorkdir?: string;
+  runMode?: 'manual' | 'auto';
 }
 
 export interface PreviewInfo {
@@ -157,6 +158,16 @@ export interface Task {
   merged_into?: string | null;
   merged_at?: string | null;
   preview?: PreviewInfo;
+  assignee_agent_id?: string | null;
+  assignee_name?: string | null;
+  queue_order?: number | null;
+  review?: {
+    required: boolean;
+    reviewer_type: 'human' | 'agent' | 'orchestrator' | 'none';
+    reviewer_agent_id?: string | null;
+    status: 'none' | 'pending' | 'approved' | 'rejected';
+    note?: string;
+  };
 }
 
 export interface TaskGitMergedStatus {
@@ -278,6 +289,7 @@ export const projectsApi = {
       preview_install_command?: string;
       preview_install_if_needed?: boolean;
       preview_workdir?: string;
+      run_mode?: 'manual' | 'auto';
     },
   ) =>
     api<Project>(`/projects/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -323,6 +335,10 @@ export const tasksApi = {
       constraints?: string;
       agent_notes?: string;
       use_isolation?: boolean;
+      assignee_agent_id?: string | null;
+      assignee_name?: string | null;
+      queue_order?: number | null;
+      review?: Partial<Task['review']>;
     },
   ) =>
     api<Task>(`/projects/${projectId}/tasks`, { method: 'POST', body: JSON.stringify(data) }),
@@ -336,6 +352,10 @@ export const tasksApi = {
       constraints?: string;
       expected_version: number;
       use_isolation?: boolean;
+      assignee_agent_id?: string | null;
+      assignee_name?: string | null;
+      queue_order?: number | null;
+      review?: Partial<NonNullable<Task['review']>>;
     },
   ) =>
     api<Task>(`/tasks/${taskId}?project_id=${projectId}`, {
@@ -440,3 +460,156 @@ export function folderNameFromPath(folderPath: string): string {
   const parts = folderPath.replace(/[\\/]+$/, '').split(/[\\/]/);
   return parts[parts.length - 1] ?? '';
 }
+
+export interface StaffAgent {
+  id: string;
+  project_id: string;
+  name: string;
+  role: string;
+  system_prompt: string;
+  skills_tags: string[];
+  status: string;
+  assignable: boolean;
+  created_by: string;
+  prompt_source: string;
+  creation_rationale?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AutoRun {
+  id: string;
+  project_id: string;
+  goal: string;
+  status: string;
+  phase: string;
+  thread_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AutoRunMessage {
+  id: string;
+  run_id: string;
+  role: string;
+  content: string;
+  at: string;
+}
+
+export interface Decision {
+  id: string;
+  project_id: string;
+  run_id: string | null;
+  title: string;
+  summary: string;
+  options: Array<{ id: string; label: string; description?: string }>;
+  recommended_option_id: string | null;
+  chosen_option_id: string | null;
+  status: string;
+  note: string | null;
+  created_at: string;
+}
+
+export interface ReviewPolicy {
+  project_id: string;
+  version: number;
+  ai_review_paths: string[];
+  ai_review_task_types: string[];
+  human_verify_paths: string[];
+  human_verify_notes: string;
+  default_reviewer_type: string;
+  confirmed: boolean;
+  confirmed_at?: string | null;
+}
+
+export const agentsApi = {
+  list: (projectId: string) => api<StaffAgent[]>(`/projects/${projectId}/agents`),
+  create: (
+    projectId: string,
+    data: {
+      name: string;
+      role: string;
+      system_prompt: string;
+      skills_tags?: string[];
+      assignable?: boolean;
+      creation_rationale?: string;
+    },
+  ) =>
+    api<StaffAgent>(`/projects/${projectId}/agents`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  update: (
+    agentId: string,
+    data: Partial<{
+      name: string;
+      role: string;
+      system_prompt: string;
+      skills_tags: string[];
+      assignable: boolean;
+      status: string;
+    }>,
+  ) => api<StaffAgent>(`/agents/${agentId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  retire: (agentId: string) =>
+    api<StaffAgent>(`/agents/${agentId}/retire`, { method: 'POST' }),
+  get: (agentId: string) => api<StaffAgent>(`/agents/${agentId}`),
+};
+
+export const autoApi = {
+  listRuns: (projectId: string) => api<AutoRun[]>(`/projects/${projectId}/runs`),
+  startRun: (projectId: string, goal: string) =>
+    api<{ run: AutoRun; messages: AutoRunMessage[]; decisions?: Decision[] }>(
+      `/projects/${projectId}/runs`,
+      { method: 'POST', body: JSON.stringify({ goal }) },
+    ),
+  getRun: (runId: string) =>
+    api<{ run: AutoRun; messages: AutoRunMessage[]; decisions: Decision[] }>(`/runs/${runId}`),
+  message: (runId: string, message: string) =>
+    api<{ run: AutoRun; messages: AutoRunMessage[]; decisions?: Decision[] }>(
+      `/runs/${runId}/message`,
+      { method: 'POST', body: JSON.stringify({ message }) },
+    ),
+  pause: (runId: string) => api<AutoRun>(`/runs/${runId}/pause`, { method: 'POST' }),
+  resume: (runId: string) =>
+    api<{ run: AutoRun; messages: AutoRunMessage[] }>(`/runs/${runId}/resume`, {
+      method: 'POST',
+    }),
+  stop: (runId: string) => api<AutoRun>(`/runs/${runId}/stop`, { method: 'POST' }),
+  tick: (runId: string) =>
+    api<{ run: AutoRun; messages: AutoRunMessage[] }>(`/runs/${runId}/tick`, { method: 'POST' }),
+  listDecisions: (projectId: string, status?: string) =>
+    api<Decision[]>(
+      `/projects/${projectId}/decisions${status ? `?status=${status}` : ''}`,
+    ),
+  resolveDecision: (decisionId: string, chosen_option_id: string, note?: string) =>
+    api<{ decision: Decision; run?: AutoRun; messages?: AutoRunMessage[] }>(
+      `/decisions/${decisionId}/resolve`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ chosen_option_id, note }),
+      },
+    ),
+  listMeetings: (projectId: string) => api<unknown[]>(`/projects/${projectId}/meetings`),
+  getPolicy: (projectId: string) => api<ReviewPolicy>(`/projects/${projectId}/review-policy`),
+  updatePolicy: (projectId: string, data: Partial<ReviewPolicy>, confirm?: boolean) =>
+    api<ReviewPolicy>(
+      `/projects/${projectId}/review-policy${confirm ? '?confirm=1' : ''}`,
+      { method: 'PUT', body: JSON.stringify(data) },
+    ),
+  runnerStatus: (projectId: string) =>
+    api<{
+      provider: 'cursor' | 'opencode';
+      configured: boolean;
+      concurrency: number;
+      jobs: Array<{
+        id: string;
+        taskId: string;
+        status: string;
+        agentName: string;
+        provider?: string;
+        error?: string | null;
+        resultSummary?: string | null;
+        updatedAt: string;
+      }>;
+    }>(`/projects/${projectId}/runner/status`),
+};

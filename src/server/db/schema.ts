@@ -86,3 +86,98 @@ export const previewServers = sqliteTable('preview_servers', {
   startedAt: text('started_at'),
   updatedAt: text('updated_at').notNull(),
 });
+
+export const staffAgents = sqliteTable('staff_agents', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id')
+    .notNull()
+    .references(() => projects.id),
+  name: text('name').notNull(),
+  role: text('role').notNull(),
+  systemPrompt: text('system_prompt').notNull(),
+  skillsTags: text('skills_tags').notNull().default('[]'),
+  status: text('status').notNull().default('idle'),
+  assignable: integer('assignable', { mode: 'boolean' }).notNull().default(false),
+  createdBy: text('created_by').notNull(),
+  promptSource: text('prompt_source').notNull(),
+  creationRationale: text('creation_rationale'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+export const autoRuns = sqliteTable('auto_runs', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id')
+    .notNull()
+    .references(() => projects.id),
+  goal: text('goal').notNull(),
+  status: text('status').notNull().default('running'),
+  phase: text('phase').notNull().default('intake'),
+  threadId: text('thread_id').notNull(),
+  checkpointJson: text('checkpoint_json').default('{}'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+export const autoRunMessages = sqliteTable('auto_run_messages', {
+  id: text('id').primaryKey(),
+  runId: text('run_id')
+    .notNull()
+    .references(() => autoRuns.id),
+  role: text('role').notNull(),
+  content: text('content').notNull(),
+  at: text('at').notNull(),
+});
+
+export const decisions = sqliteTable('decisions', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id')
+    .notNull()
+    .references(() => projects.id),
+  runId: text('run_id').references(() => autoRuns.id),
+  title: text('title').notNull(),
+  summary: text('summary').notNull().default(''),
+  optionsJson: text('options_json').notNull().default('[]'),
+  recommendedOptionId: text('recommended_option_id'),
+  chosenOptionId: text('chosen_option_id'),
+  status: text('status').notNull().default('open'),
+  note: text('note'),
+  createdAt: text('created_at').notNull(),
+  resolvedAt: text('resolved_at'),
+});
+
+export const meetings = sqliteTable('meetings', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id')
+    .notNull()
+    .references(() => projects.id),
+  runId: text('run_id').references(() => autoRuns.id),
+  topic: text('topic').notNull(),
+  participantIdsJson: text('participant_ids_json').notNull().default('[]'),
+  summary: text('summary').default(''),
+  escalatedToDecisionId: text('escalated_to_decision_id'),
+  createdAt: text('created_at').notNull(),
+});
+
+export const meetingMessages = sqliteTable('meeting_messages', {
+  id: text('id').primaryKey(),
+  meetingId: text('meeting_id')
+    .notNull()
+    .references(() => meetings.id),
+  agentId: text('agent_id'),
+  agentName: text('agent_name'),
+  role: text('role').notNull(),
+  content: text('content').notNull(),
+  at: text('at').notNull(),
+});
+
+export const reviewPolicies = sqliteTable('review_policies', {
+  projectId: text('project_id')
+    .primaryKey()
+    .references(() => projects.id),
+  version: integer('version').notNull().default(1),
+  policyJson: text('policy_json').notNull(),
+  confirmed: integer('confirmed', { mode: 'boolean' }).notNull().default(false),
+  confirmedAt: text('confirmed_at'),
+  updatedAt: text('updated_at').notNull(),
+});

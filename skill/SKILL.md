@@ -100,11 +100,22 @@ If `acceptance_criteria` is filled, the task is created as `todo` and appears in
 
 ### 1. Check inbox
 
+Prefer filtering by assignee when working as a named staff agent:
+
 ```http
-GET /api/v1/inbox
+GET /api/v1/inbox?agent_name={your_staff_name}
+GET /api/v1/inbox?assignee_agent_id={staff_agent_id}&project_id={project_id}
 ```
 
-Returns all `todo` tasks across projects.
+Sort is by `queue_order` then created time. Unassigned todos remain visible when no filter is set.
+
+If the task has `assignee_agent_id`, fetch the staff prompt:
+
+```http
+GET /api/v1/agents/{assignee_agent_id}
+```
+
+Use `system_prompt` as your working persona. Claim with `agent_name` equal to the staff `name` when possible.
 
 ### 2. Read task details
 
@@ -112,8 +123,9 @@ Returns all `todo` tasks across projects.
 GET /api/v1/tasks/{task_id}?project_id={project_id}
 ```
 
-Response includes: title, goal, acceptance_criteria, constraints, `workspace_path`, `execution_path`, `worktree_path`, `git_branch`, `isolation_status`, rejections, agent_notes.
+Response includes: title, goal, acceptance_criteria, constraints, `assignee_agent_id`, `assignee_name`, `queue_order`, `review`, `workspace_path`, `execution_path`, `worktree_path`, `git_branch`, `isolation_status`, rejections, agent_notes.
 
+After `complete`, `review.status` becomes `pending` when review is required (human / agent / orchestrator).
 ### 3. Claim a task
 
 ```http

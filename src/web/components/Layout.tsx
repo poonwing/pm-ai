@@ -123,6 +123,26 @@ export function Layout() {
               任務
             </NavLink>
             <NavLink
+              to={`/projects/${projectId}/agents`}
+              className={({ isActive }) =>
+                `block px-3 py-2 rounded-md text-sm transition-colors ${
+                  isActive ? 'bg-accent font-medium' : 'text-muted-foreground hover:bg-accent/50'
+                }`
+              }
+            >
+              AI 員工
+            </NavLink>
+            <NavLink
+              to={`/projects/${projectId}/auto`}
+              className={({ isActive }) =>
+                `block px-3 py-2 rounded-md text-sm transition-colors ${
+                  isActive ? 'bg-accent font-medium' : 'text-muted-foreground hover:bg-accent/50'
+                }`
+              }
+            >
+              Auto
+            </NavLink>
+            <NavLink
               to={`/projects/${projectId}/settings`}
               className={({ isActive }) =>
                 `block px-3 py-2 rounded-md text-sm transition-colors ${

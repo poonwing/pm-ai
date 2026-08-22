@@ -199,6 +199,8 @@ export function TasksPage() {
                 <th className="pb-2 pr-4">狀態</th>
                 <th className="pb-2 pr-4">ID</th>
                 <th className="pb-2 pr-4">標題</th>
+                <th className="pb-2 pr-4">指派</th>
+                <th className="pb-2 pr-4">審查</th>
                 <th className="pb-2">更新</th>
               </tr>
             </thead>
@@ -218,6 +220,16 @@ export function TasksPage() {
                   </td>
                   <td className="py-2 pr-4 font-mono text-xs text-muted-foreground">{task.id}</td>
                   <td className="py-2 pr-4">{task.title}</td>
+                  <td className="py-2 pr-4 text-xs">
+                    {task.assignee_name
+                      ? `@${task.assignee_name}${task.queue_order != null ? ` #${task.queue_order}` : ''}`
+                      : '—'}
+                  </td>
+                  <td className="py-2 pr-4 text-xs">
+                    {task.review
+                      ? `${task.review.reviewer_type}/${task.review.status}`
+                      : '—'}
+                  </td>
                   <td className="py-2 text-xs text-muted-foreground">
                     {formatRelativeTime(task.updatedAt)}
                   </td>
@@ -324,9 +336,27 @@ export function TasksPage() {
   );
 }
 
+function reviewBadge(task: Task): string | null {
+  if (task.status !== 'done') return null;
+  const r = task.review;
+  if (r?.required === false || r?.reviewer_type === 'none' || r?.status === 'approved') {
+    return r?.status === 'approved' ? '審查通過' : null;
+  }
+  if (!r || r.reviewer_type === 'human') {
+    return task.humanReviewed ? null : '待人驗';
+  }
+  if (r.reviewer_type === 'orchestrator') return '待協調者复查';
+  if (r.reviewer_type === 'agent') return `待 AI 复查`;
+  if (r.status === 'pending') return '待審查';
+  return null;
+}
+
 function TaskCard({ task, projectId }: { task: Task; projectId: string }) {
   const label =
-    task.status === 'done' && !task.humanReviewed ? '待你驗收' : statusLabel(task.status);
+    task.status === 'done' && !task.humanReviewed && (!task.review || task.review.reviewer_type === 'human')
+      ? '待你驗收'
+      : statusLabel(task.status);
+  const rev = reviewBadge(task);
 
   return (
     <Link
@@ -338,8 +368,15 @@ function TaskCard({ task, projectId }: { task: Task; projectId: string }) {
         <div className="min-w-0">
           <p className="text-sm font-medium truncate">{task.title}</p>
           <p className="text-xs text-muted-foreground mt-1">{task.id}</p>
-          <div className="flex items-center justify-between mt-2">
+          {(task.assignee_name || task.queue_order != null) && (
+            <p className="text-xs text-blue-700 mt-1 truncate">
+              {task.assignee_name ? `@${task.assignee_name}` : ''}
+              {task.queue_order != null ? ` #${task.queue_order}` : ''}
+            </p>
+          )}
+          <div className="flex items-center justify-between mt-2 gap-1 flex-wrap">
             <Badge className={statusColor(task.status, task.humanReviewed)}>{label}</Badge>
+            {rev && <Badge className="bg-violet-100 text-violet-800">{rev}</Badge>}
             <span className="text-xs text-muted-foreground">
               {formatRelativeTime(task.updatedAt)}
             </span>
@@ -352,3 +389,4 @@ function TaskCard({ task, projectId }: { task: Task; projectId: string }) {
     </Link>
   );
 }
+

@@ -26,6 +26,12 @@ import {
   CreateCommentSchema,
   CheckoutBranchSchema,
   MergeTaskBranchSchema,
+  CreateStaffAgentSchema,
+  UpdateStaffAgentSchema,
+  CreateAutoRunSchema,
+  AutoRunMessageSchema,
+  ResolveDecisionSchema,
+  UpdateReviewPolicySchema,
   TASK_STATUSES,
   STATUS_LABELS,
   PORT,
@@ -45,9 +51,14 @@ import {
   MergeConflictError,
   AlreadyMergedError,
 } from './services/tasks.js';
+import * as agentsService from './services/agents.js';
+import * as autoService from './services/auto.js';
+import * as orchestrator from './orchestrator/index.js';
+import { isModelConfigured } from './orchestrator/model.js';
+import { getRunnerStatus } from './runner/index.js';
 
 type Variables = {
-  actor: 'human' | 'agent';
+  actor: 'human' | 'agent' | 'orchestrator';
 };
 
 const app = new Hono<{ Variables: Variables }>();
@@ -99,7 +110,7 @@ function errorResponse(c: Context, err: unknown) {
   return c.json({ error: '內部錯誤', code: 'INTERNAL' }, 500);
 }
 
-function authMiddleware(actor: 'human' | 'agent' | 'any') {
+function authMiddleware(actor: 'human' | 'agent' | 'orchestrator' | 'any' | 'human_or_orchestrator') {
   return async (c: Context<{ Variables: Variables }>, next: Next) => {
     const host = c.req.header('host') ?? '';
     if (!host.startsWith('127.0.0.1') && !host.startsWith('localhost')) {
@@ -114,7 +125,11 @@ function authMiddleware(actor: 'human' | 'agent' | 'any') {
       return c.json({ error: 'Unauthorized', code: 'UNAUTHORIZED' }, 401);
     }
 
-    const actorHeader = c.req.header('x-pm-ai-actor') as 'human' | 'agent' | undefined;
+    const actorHeader = c.req.header('x-pm-ai-actor') as
+      | 'human'
+      | 'agent'
+      | 'orchestrator'
+      | undefined;
     const resolvedActor = actorHeader ?? 'human';
 
     if (actor === 'human' && resolvedActor !== 'human') {
@@ -122,6 +137,16 @@ function authMiddleware(actor: 'human' | 'agent' | 'any') {
     }
     if (actor === 'agent' && resolvedActor !== 'agent') {
       return c.json({ error: '此端點僅限 Agent 使用', code: 'FORBIDDEN' }, 403);
+    }
+    if (actor === 'orchestrator' && resolvedActor !== 'orchestrator') {
+      return c.json({ error: '此端點僅限協調者使用', code: 'FORBIDDEN' }, 403);
+    }
+    if (
+      actor === 'human_or_orchestrator' &&
+      resolvedActor !== 'human' &&
+      resolvedActor !== 'orchestrator'
+    ) {
+      return c.json({ error: '此端點僅限人或協調者', code: 'FORBIDDEN' }, 403);
     }
 
     c.set('actor', resolvedActor);
@@ -297,7 +322,8 @@ app.get('/api/v1/projects/:id/tasks', authMiddleware('any'), (c) => {
 app.post('/api/v1/projects/:id/tasks', authMiddleware('any'), zValidator('json', CreateTaskSchema), (c) => {
   try {
     const body = c.req.valid('json');
-    const actor = c.get('actor') ?? 'human';
+    const raw = c.get('actor') ?? 'human';
+    const actor = raw === 'agent' || raw === 'orchestrator' ? 'agent' : 'human';
     return c.json(taskService.createTask(requireParam(c, 'id'), body, actor), 201);
   } catch (err) {
     return errorResponse(c, err);
@@ -307,7 +333,13 @@ app.post('/api/v1/projects/:id/tasks', authMiddleware('any'), zValidator('json',
 // Agent inbox
 app.get('/api/v1/inbox', authMiddleware('agent'), (c) => {
   try {
-    return c.json(taskService.getInbox());
+    return c.json(
+      taskService.getInbox({
+        assignee_agent_id: c.req.query('assignee_agent_id') ?? undefined,
+        agent_name: c.req.query('agent_name') ?? undefined,
+        project_id: c.req.query('project_id') ?? undefined,
+      }),
+    );
   } catch (err) {
     return errorResponse(c, err);
   }
@@ -340,7 +372,8 @@ app.post(
   (c) => {
     try {
       const projectId = requireProjectId(c);
-      const actor = c.get('actor') ?? 'human';
+      const raw = c.get('actor') ?? 'human';
+      const actor = raw === 'agent' || raw === 'orchestrator' ? 'agent' : 'human';
       const body = c.req.valid('json');
       return c.json(
         taskService.addComment(projectId, requireParam(c, 'id'), body, actor),
@@ -685,6 +718,241 @@ app.post('/api/v1/tasks/:id/release', authMiddleware('agent'), zValidator('json'
     return errorResponse(c, err);
   }
 });
+
+// --- Auto mode: staff agents, runs, decisions, meetings, policy ---
+
+app.get('/api/v1/meta/model', authMiddleware('any'), (c) => {
+  return c.json({ configured: isModelConfigured() });
+});
+
+app.get('/api/v1/projects/:id/agents', authMiddleware('any'), (c) => {
+  try {
+    agentsService.ensureOrchestratorAgent(requireParam(c, 'id'));
+    return c.json(agentsService.listStaffAgents(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post(
+  '/api/v1/projects/:id/agents',
+  authMiddleware('human_or_orchestrator'),
+  zValidator('json', CreateStaffAgentSchema),
+  (c) => {
+    try {
+      const actor = c.get('actor');
+      const createdBy = actor === 'orchestrator' ? 'orchestrator' : 'human';
+      return c.json(
+        agentsService.createStaffAgent(requireParam(c, 'id'), c.req.valid('json'), createdBy),
+        201,
+      );
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  },
+);
+
+app.get('/api/v1/agents/:id', authMiddleware('any'), (c) => {
+  try {
+    return c.json(agentsService.getStaffAgent(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.patch(
+  '/api/v1/agents/:id',
+  authMiddleware('human_or_orchestrator'),
+  zValidator('json', UpdateStaffAgentSchema),
+  (c) => {
+    try {
+      const editor = c.get('actor') === 'orchestrator' ? 'orchestrator' : 'human';
+      return c.json(agentsService.updateStaffAgent(requireParam(c, 'id'), c.req.valid('json'), editor));
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  },
+);
+
+app.post('/api/v1/agents/:id/retire', authMiddleware('human'), (c) => {
+  try {
+    return c.json(agentsService.retireStaffAgent(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.get('/api/v1/projects/:id/runs', authMiddleware('any'), (c) => {
+  try {
+    return c.json(autoService.listAutoRuns(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post(
+  '/api/v1/projects/:id/runs',
+  authMiddleware('human'),
+  zValidator('json', CreateAutoRunSchema),
+  async (c) => {
+    try {
+      const projectId = requireParam(c, 'id');
+      taskService.updateProject(projectId, { run_mode: 'auto' });
+      const body = c.req.valid('json');
+      const result = await orchestrator.startOrchestratorRun(projectId, body.goal);
+      return c.json(result, 201);
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  },
+);
+
+app.get('/api/v1/runs/:id', authMiddleware('any'), (c) => {
+  try {
+    const run = autoService.getAutoRun(requireParam(c, 'id'));
+    return c.json({
+      run,
+      messages: autoService.getAutoRunMessages(run.id),
+      decisions: autoService.listDecisions(run.project_id, 'open').filter((d) => d.run_id === run.id),
+    });
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post('/api/v1/runs/:id/pause', authMiddleware('human'), (c) => {
+  try {
+    return c.json(autoService.pauseAutoRun(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post('/api/v1/runs/:id/resume', authMiddleware('human'), async (c) => {
+  try {
+    const run = autoService.resumeAutoRun(requireParam(c, 'id'));
+    const result = await orchestrator.tickOrchestrator(run.id);
+    return c.json(result);
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post('/api/v1/runs/:id/stop', authMiddleware('human'), (c) => {
+  try {
+    return c.json(orchestrator.requestStop(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post(
+  '/api/v1/runs/:id/message',
+  authMiddleware('human'),
+  zValidator('json', AutoRunMessageSchema),
+  async (c) => {
+    try {
+      const result = await orchestrator.messageOrchestrator(
+        requireParam(c, 'id'),
+        c.req.valid('json').message,
+      );
+      return c.json(result);
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  },
+);
+
+app.post('/api/v1/runs/:id/tick', authMiddleware('human'), async (c) => {
+  try {
+    return c.json(await orchestrator.tickOrchestrator(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.get('/api/v1/projects/:id/decisions', authMiddleware('any'), (c) => {
+  try {
+    return c.json(
+      autoService.listDecisions(requireParam(c, 'id'), c.req.query('status') ?? undefined),
+    );
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post(
+  '/api/v1/decisions/:id/resolve',
+  authMiddleware('human'),
+  zValidator('json', ResolveDecisionSchema),
+  async (c) => {
+    try {
+      const id = requireParam(c, 'id');
+      const body = c.req.valid('json');
+      const before = autoService.getDecision(id);
+      const decision = autoService.resolveDecision(id, body.chosen_option_id, body.note);
+      if (before.title.includes('Review Policy') && decision.run_id) {
+        const result = await orchestrator.handlePolicyDecision(id, body.chosen_option_id);
+        return c.json({ decision, ...result });
+      }
+      if (decision.run_id) {
+        const result = await orchestrator.tickOrchestrator(decision.run_id);
+        return c.json({ decision, ...result });
+      }
+      return c.json({ decision });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  },
+);
+
+app.get('/api/v1/projects/:id/meetings', authMiddleware('any'), (c) => {
+  try {
+    return c.json(autoService.listMeetings(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.get('/api/v1/meetings/:id', authMiddleware('any'), (c) => {
+  try {
+    return c.json(autoService.getMeeting(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.get('/api/v1/projects/:id/review-policy', authMiddleware('any'), (c) => {
+  try {
+    return c.json(autoService.getReviewPolicy(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.get('/api/v1/projects/:id/runner/status', authMiddleware('any'), (c) => {
+  try {
+    return c.json(getRunnerStatus(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.put(
+  '/api/v1/projects/:id/review-policy',
+  authMiddleware('human'),
+  zValidator('json', UpdateReviewPolicySchema),
+  (c) => {
+    try {
+      const confirm = c.req.query('confirm') === '1';
+      return c.json(
+        autoService.upsertReviewPolicy(requireParam(c, 'id'), c.req.valid('json'), confirm),
+      );
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  },
+);
 
 // Activity status
 app.get('/api/v1/activity/recent', authMiddleware('any'), (c) => {

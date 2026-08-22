@@ -94,6 +94,86 @@ function runMigrations(db: ReturnType<typeof drizzle<typeof schema>>) {
       updated_at TEXT NOT NULL
     );
   `);
+  db.$client.exec(`
+    CREATE TABLE IF NOT EXISTS staff_agents (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      name TEXT NOT NULL,
+      role TEXT NOT NULL,
+      system_prompt TEXT NOT NULL,
+      skills_tags TEXT NOT NULL DEFAULT '[]',
+      status TEXT NOT NULL DEFAULT 'idle',
+      assignable INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT NOT NULL,
+      prompt_source TEXT NOT NULL,
+      creation_rationale TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_staff_agents_project ON staff_agents(project_id);
+    CREATE TABLE IF NOT EXISTS auto_runs (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      goal TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'running',
+      phase TEXT NOT NULL DEFAULT 'intake',
+      thread_id TEXT NOT NULL,
+      checkpoint_json TEXT DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_auto_runs_project ON auto_runs(project_id, status);
+    CREATE TABLE IF NOT EXISTS auto_run_messages (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES auto_runs(id),
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_auto_run_messages ON auto_run_messages(run_id, at);
+    CREATE TABLE IF NOT EXISTS decisions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      run_id TEXT REFERENCES auto_runs(id),
+      title TEXT NOT NULL,
+      summary TEXT NOT NULL DEFAULT '',
+      options_json TEXT NOT NULL DEFAULT '[]',
+      recommended_option_id TEXT,
+      chosen_option_id TEXT,
+      status TEXT NOT NULL DEFAULT 'open',
+      note TEXT,
+      created_at TEXT NOT NULL,
+      resolved_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id, status);
+    CREATE TABLE IF NOT EXISTS meetings (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      run_id TEXT REFERENCES auto_runs(id),
+      topic TEXT NOT NULL,
+      participant_ids_json TEXT NOT NULL DEFAULT '[]',
+      summary TEXT DEFAULT '',
+      escalated_to_decision_id TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS meeting_messages (
+      id TEXT PRIMARY KEY,
+      meeting_id TEXT NOT NULL REFERENCES meetings(id),
+      agent_id TEXT,
+      agent_name TEXT,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS review_policies (
+      project_id TEXT PRIMARY KEY REFERENCES projects(id),
+      version INTEGER NOT NULL DEFAULT 1,
+      policy_json TEXT NOT NULL,
+      confirmed INTEGER NOT NULL DEFAULT 0,
+      confirmed_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+  `);
 }
 
 export function getDb() {

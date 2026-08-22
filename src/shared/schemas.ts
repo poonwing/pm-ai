@@ -21,8 +21,65 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
 export const BINDING_STATUSES = ['ok', 'missing', 'moved_unresolved', 'conflict'] as const;
 export type BindingStatus = (typeof BINDING_STATUSES)[number];
 
-export const ACTOR_TYPES = ['human', 'agent', 'system'] as const;
+export const ACTOR_TYPES = ['human', 'agent', 'system', 'orchestrator'] as const;
 export type ActorType = (typeof ACTOR_TYPES)[number];
+
+export const RUN_MODES = ['manual', 'auto'] as const;
+export type RunMode = (typeof RUN_MODES)[number];
+
+export const AGENT_ROLES = [
+  'orchestrator',
+  'developer',
+  'tester',
+  'designer',
+  'reviewer',
+] as const;
+export type AgentRole = (typeof AGENT_ROLES)[number] | (string & {});
+
+export const STAFF_STATUSES = ['idle', 'working', 'blocked', 'retired'] as const;
+export type StaffStatus = (typeof STAFF_STATUSES)[number];
+
+export const PROMPT_SOURCES = [
+  'orchestrator_generated',
+  'human_written',
+  'human_edited',
+] as const;
+export type PromptSource = (typeof PROMPT_SOURCES)[number];
+
+export const AUTO_RUN_STATUSES = [
+  'running',
+  'paused',
+  'awaiting_human',
+  'completed',
+  'stopped',
+] as const;
+export type AutoRunStatus = (typeof AUTO_RUN_STATUSES)[number];
+
+export const DECISION_STATUSES = ['open', 'resolved', 'cancelled'] as const;
+export type DecisionStatus = (typeof DECISION_STATUSES)[number];
+
+/** Free-text decision answer; requires a non-empty `note` on resolve. */
+export const CUSTOM_DECISION_OPTION_ID = 'custom';
+
+export const REVIEWER_TYPES = ['human', 'agent', 'orchestrator', 'none'] as const;
+export type ReviewerType = (typeof REVIEWER_TYPES)[number];
+
+export const TASK_REVIEW_STATUSES = [
+  'none',
+  'pending',
+  'approved',
+  'rejected',
+] as const;
+export type TaskReviewStatus = (typeof TASK_REVIEW_STATUSES)[number];
+
+export const TaskReviewSchema = z.object({
+  required: z.boolean().default(true),
+  reviewer_type: z.enum(REVIEWER_TYPES).default('human'),
+  reviewer_agent_id: z.string().nullable().optional().default(null),
+  status: z.enum(TASK_REVIEW_STATUSES).default('none'),
+  note: z.string().default(''),
+});
+export type TaskReview = z.infer<typeof TaskReviewSchema>;
 
 export const ACTIVITY_ACTIONS = [
   'created',
@@ -85,6 +142,16 @@ export const TaskFrontmatterSchema = z.object({
   use_isolation: z.boolean().optional().default(false),
   merged_into: z.string().nullable().optional().default(null),
   merged_at: z.string().nullable().optional().default(null),
+  assignee_agent_id: z.string().nullable().optional().default(null),
+  assignee_name: z.string().nullable().optional().default(null),
+  queue_order: z.number().int().nullable().optional().default(null),
+  review: TaskReviewSchema.optional().default({
+    required: true,
+    reviewer_type: 'human',
+    reviewer_agent_id: null,
+    status: 'none',
+    note: '',
+  }),
 });
 
 export type TaskFrontmatter = z.infer<typeof TaskFrontmatterSchema>;
@@ -102,6 +169,7 @@ export const ProjectConfigSchema = z.object({
   preview_install_command: z.string().default(DEFAULT_PREVIEW_INSTALL_COMMAND),
   preview_install_if_needed: z.boolean().default(true),
   preview_workdir: z.string().default(''),
+  run_mode: z.enum(RUN_MODES).default('manual'),
 });
 
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
@@ -120,6 +188,7 @@ export const UpdateProjectSchema = z.object({
   preview_install_command: z.string().min(1).optional(),
   preview_install_if_needed: z.boolean().optional(),
   preview_workdir: z.string().optional(),
+  run_mode: z.enum(RUN_MODES).optional(),
 });
 
 export const RelocateProjectSchema = z.object({
@@ -134,6 +203,10 @@ export const CreateTaskSchema = z.object({
   agent_notes: z.string().optional(),
   agent_name: z.string().min(1).optional(),
   use_isolation: z.boolean().optional().default(false),
+  assignee_agent_id: z.string().nullable().optional(),
+  assignee_name: z.string().nullable().optional(),
+  queue_order: z.number().int().nullable().optional(),
+  review: TaskReviewSchema.partial().optional(),
 });
 
 export const UpdateTaskSchema = z.object({
@@ -144,11 +217,72 @@ export const UpdateTaskSchema = z.object({
   agent_notes: z.string().optional(),
   expected_version: z.number().int().positive(),
   use_isolation: z.boolean().optional(),
+  assignee_agent_id: z.string().nullable().optional(),
+  assignee_name: z.string().nullable().optional(),
+  queue_order: z.number().int().nullable().optional(),
+  review: TaskReviewSchema.partial().optional(),
 });
+
+export const CreateStaffAgentSchema = z.object({
+  name: z.string().min(1),
+  role: z.string().min(1),
+  system_prompt: z.string().min(1),
+  skills_tags: z.array(z.string()).optional().default([]),
+  assignable: z.boolean().optional(),
+  creation_rationale: z.string().optional(),
+});
+
+export const UpdateStaffAgentSchema = z.object({
+  name: z.string().min(1).optional(),
+  role: z.string().min(1).optional(),
+  system_prompt: z.string().min(1).optional(),
+  skills_tags: z.array(z.string()).optional(),
+  assignable: z.boolean().optional(),
+  status: z.enum(STAFF_STATUSES).optional(),
+  creation_rationale: z.string().optional(),
+});
+
+export const CreateAutoRunSchema = z.object({
+  goal: z.string().min(1),
+});
+
+export const AutoRunMessageSchema = z.object({
+  message: z.string().min(1),
+});
+
+export const ResolveDecisionSchema = z
+  .object({
+    chosen_option_id: z.string().min(1),
+    note: z.string().optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (val.chosen_option_id === CUSTOM_DECISION_OPTION_ID && !val.note?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '自訂決策請填寫說明',
+        path: ['note'],
+      });
+    }
+  });
+
+export const ReviewPolicySchema = z.object({
+  version: z.number().int().positive().default(1),
+  ai_review_paths: z.array(z.string()).default([]),
+  ai_review_task_types: z.array(z.string()).default([]),
+  human_verify_paths: z.array(z.string()).default([]),
+  human_verify_notes: z.string().default(''),
+  default_reviewer_type: z.enum(REVIEWER_TYPES).default('human'),
+  confirmed: z.boolean().default(false),
+  confirmed_at: z.string().nullable().optional(),
+});
+export type ReviewPolicy = z.infer<typeof ReviewPolicySchema>;
+
+export const UpdateReviewPolicySchema = ReviewPolicySchema.partial();
 
 export const ClaimTaskSchema = z.object({
   agent_name: z.string().min(1),
   expected_version: z.number().int().positive(),
+  agent_id: z.string().optional(),
 });
 
 export const HeartbeatSchema = z.object({
@@ -219,8 +353,31 @@ export function canTransition(
 }
 
 export function isPendingReview(task: TaskFrontmatter): boolean {
-  return task.status === 'done' && !task.human_reviewed;
+  if (task.status !== 'done') return false;
+  const review = task.review;
+  if (review?.required === false || review?.reviewer_type === 'none') return false;
+  if (review?.status === 'approved') return false;
+  if (!review || review.reviewer_type === 'human') {
+    return !task.human_reviewed;
+  }
+  return review.status === 'pending' || review.status === 'none';
 }
+
+export function needsHumanAttention(task: TaskFrontmatter): boolean {
+  if (task.status === 'draft') return true;
+  if (task.status === 'done' && (!task.review || task.review.reviewer_type === 'human')) {
+    if (isPendingReview(task)) return true;
+  }
+  if (
+    task.status === 'done' &&
+    task.review?.reviewer_type === 'human' &&
+    (task.review.status === 'pending' || !task.human_reviewed)
+  ) {
+    return true;
+  }
+  return false;
+}
+
 
 export const CHANGE_FILE_STATUSES = ['A', 'M', 'D', 'R', '?'] as const;
 export type ChangeFileStatus = (typeof CHANGE_FILE_STATUSES)[number];
@@ -334,9 +491,3 @@ export const MergeTaskBranchResultSchema = z.object({
 });
 
 export type MergeTaskBranchResult = z.infer<typeof MergeTaskBranchResultSchema>;
-
-export function needsHumanAttention(task: TaskFrontmatter): boolean {
-  if (task.status === 'draft') return true;
-  if (isPendingReview(task)) return true;
-  return false;
-}
