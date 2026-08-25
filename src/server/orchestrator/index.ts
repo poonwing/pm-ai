@@ -80,7 +80,16 @@ function parseJsonLoose<T>(text: string): T {
   const trimmed = text.trim();
   const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
   const raw = fence ? fence[1].trim() : trimmed;
-  return JSON.parse(raw) as T;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      return JSON.parse(raw.slice(start, end + 1)) as T;
+    }
+    throw new Error(`模型未返回有效 JSON：${raw.slice(0, 200)}`);
+  }
 }
 
 /** Per-run tick mutex: serialize concurrent ticks; never run two planners at once. */

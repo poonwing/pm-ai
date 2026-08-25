@@ -2,12 +2,22 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 
 export async function pickFolder(initialPath?: string): Promise<string | null> {
-  if (process.platform !== 'win32') {
-    throw new Error('目前僅支援 Windows 系統選夾對話框，請手動貼上路徑');
-  }
+  const initial = initialPath && fs.existsSync(initialPath) ? initialPath : undefined;
 
-  const initial =
-    initialPath && fs.existsSync(initialPath) ? initialPath.replace(/'/g, "''") : '';
+  switch (process.platform) {
+    case 'win32':
+      return pickFolderWindows(initial);
+    case 'darwin':
+      return pickFolderMac(initial);
+    case 'linux':
+      return pickFolderLinux(initial);
+    default:
+      throw new Error('目前不支援此系統的選夾對話框，請手動貼上路徑');
+  }
+}
+
+function pickFolderWindows(initialPath?: string): Promise<string | null> {
+  const initial = initialPath ? initialPath.replace(/'/g, "''") : '';
 
   // Windows PowerShell 5.1 reads -File as the system ANSI code page (Big5 on zh-TW).
   // UTF-8 scripts then break string quotes. -EncodedCommand is always UTF-16LE.
@@ -32,17 +42,85 @@ export async function pickFolder(initialPath?: string): Promise<string | null> {
     .join('\r\n');
 
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
-  return runPowerShellEncoded(encoded);
+  return runCommand(
+    'powershell.exe',
+    ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
+    { windowsHide: true },
+  );
 }
 
-function runPowerShellEncoded(encoded: string): Promise<string | null> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      'powershell.exe',
-      ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
-      { windowsHide: true },
-    );
+function pickFolderMac(initialPath?: string): Promise<string | null> {
+  const prompt = 'Select workspace folder';
+  const defaultLocation = initialPath
+    ? ` default location POSIX file "${escapeAppleScriptString(initialPath)}"`
+    : '';
+  const script = [
+    'try',
+    '  activate',
+    `  POSIX path of (choose folder with prompt "${prompt}"${defaultLocation})`,
+    'on error number -128',
+    '  return ""',
+    'end try',
+  ].join('\n');
 
+  return runCommand('osascript', ['-l', 'AppleScript'], {
+    input: script,
+    isCancel: (code, stderr) => code === 1 && /(-128|User canceled)/i.test(stderr),
+  });
+}
+
+async function pickFolderLinux(initialPath?: string): Promise<string | null> {
+  const initial = initialPath ?? '';
+  if (await commandExists('zenity')) {
+    return runCommand('zenity', [
+      '--file-selection',
+      '--directory',
+      '--title=Select workspace folder',
+      ...(initial ? [`--filename=${initial}/`] : []),
+    ], { cancelCodes: [1] });
+  }
+  if (await commandExists('kdialog')) {
+    return runCommand(
+      'kdialog',
+      ['--getexistingdirectory', initial || '.', 'Select workspace folder'],
+      { cancelCodes: [1] },
+    );
+  }
+  throw new Error('目前僅支援 zenity 或 kdialog 系統選夾對話框，請手動貼上路徑');
+}
+
+function escapeAppleScriptString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function commandExists(command: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn('which', [command]);
+    child.on('close', (code) => resolve(code === 0));
+    child.on('error', () => resolve(false));
+  });
+}
+
+function normalizePickedPath(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  if (process.platform === 'win32') return trimmed;
+  if (trimmed === '/') return '/';
+  return trimmed.replace(/\/+$/, '');
+}
+
+function runCommand(
+  command: string,
+  args: string[],
+  options: {
+    windowsHide?: boolean;
+    input?: string;
+    cancelCodes?: number[];
+    isCancel?: (code: number | null, stderr: string) => boolean;
+  } = {},
+): Promise<string | null> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { windowsHide: options.windowsHide });
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');
@@ -53,14 +131,22 @@ function runPowerShellEncoded(encoded: string): Promise<string | null> {
     child.stderr.on('data', (chunk) => {
       stderr += chunk;
     });
+    if (options.input !== undefined) {
+      child.stdin.write(options.input);
+      child.stdin.end();
+    }
     child.on('error', reject);
     child.on('close', (code) => {
-      const selected = stdout.trim();
+      const selected = normalizePickedPath(stdout);
       if (selected) {
         resolve(selected);
         return;
       }
-      if (code === 0) {
+      if (
+        code === 0 ||
+        options.cancelCodes?.includes(code ?? -1) ||
+        options.isCancel?.(code, stderr)
+      ) {
         resolve(null);
         return;
       }
