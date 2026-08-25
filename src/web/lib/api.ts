@@ -600,6 +600,9 @@ export const autoApi = {
     api<{
       provider: 'cursor' | 'opencode';
       configured: boolean;
+      cliInstalled: boolean;
+      ready: boolean;
+      hint: string | null;
       concurrency: number;
       jobs: Array<{
         id: string;

@@ -14,3 +14,7 @@ export {
   getRunnerProvider,
   type RunnerProvider,
 } from './types.js';
+export {
+  isOpenCodeCliInstalled,
+  OPENCODE_CLI_INSTALL_HINT,
+} from './opencode-cli.js';

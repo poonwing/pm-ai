@@ -32,6 +32,8 @@ export function AutoPage() {
     }>
   >([]);
   const [runnerConfigured, setRunnerConfigured] = useState(false);
+  const [runnerCliInstalled, setRunnerCliInstalled] = useState(true);
+  const [runnerHint, setRunnerHint] = useState<string | null>(null);
   const [runnerProvider, setRunnerProvider] = useState<'cursor' | 'opencode'>('cursor');
   const [goal, setGoal] = useState('');
   const [chat, setChat] = useState('');
@@ -54,6 +56,8 @@ export function AutoPage() {
     setDecisions(openDec);
     if (runner) {
       setRunnerConfigured(runner.configured);
+      setRunnerCliInstalled(runner.cliInstalled);
+      setRunnerHint(runner.hint);
       setRunnerProvider(runner.provider);
       setRunnerJobs(runner.jobs);
     }
@@ -89,6 +93,8 @@ export function AutoPage() {
         .runnerStatus(projectId)
         .then((runner) => {
           setRunnerConfigured(runner.configured);
+          setRunnerCliInstalled(runner.cliInstalled);
+          setRunnerHint(runner.hint);
           setRunnerProvider(runner.provider);
           setRunnerJobs(runner.jobs);
         })
@@ -319,14 +325,25 @@ export function AutoPage() {
                   ? '缺少 ZAI_API_KEY'
                   : '缺少 CURSOR_API_KEY'}
             </Badge>
+            {runnerProvider === 'opencode' && (
+              <Badge className={runnerCliInstalled ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100'}>
+                {runnerCliInstalled ? 'OpenCode CLI 可用' : '缺少 OpenCode CLI'}
+              </Badge>
+            )}
           </div>
         </div>
         <p className="text-xs text-muted-foreground">
           在 <code>.env</code> 设置 <code>RUNNER_PROVIDER=cursor</code> 或{' '}
           <code>opencode</code>。OpenCode 使用官方{' '}
           <code>@opencode-ai/sdk</code>，复用 GLM 的 <code>ZAI_API_KEY</code>
-          ；本机 PATH 需有 <code>opencode</code>（SDK 会启动 serve）。
+          ；本机还需安装 <code>opencode</code> CLI（SDK 会启动 serve）。
         </p>
+        {runnerProvider === 'opencode' && !runnerCliInstalled && (
+          <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+            {runnerHint ??
+              '未检测到 OpenCode CLI。请先安装后再执行任务：curl -fsSL https://opencode.ai/install | bash  或  npm i -g opencode-ai，然后重开终端并重启 PM-AI。'}
+          </p>
+        )}
         {runnerJobs.length === 0 ? (
           <p className="text-xs text-muted-foreground">尚無執行任務。分派後會自動排隊。</p>
         ) : (

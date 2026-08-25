@@ -48,7 +48,7 @@ export function getOpenCodeRunnerConfig() {
     providerId,
     /** provider/model，传给 OpenCode config.model */
     modelRef: process.env.OPENCODE_MODEL_REF ?? `${providerId}/${modelId}`,
-    concurrency: Math.max(1, Number(process.env.CURSOR_RUNNER_CONCURRENCY ?? '1') || 1),
+    concurrency: Math.max(1, Number(process.env.OPENCODE_RUNNER_CONCURRENCY ?? '1') || 1),
   };
 }
 

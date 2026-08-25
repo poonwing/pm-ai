@@ -11,11 +11,13 @@ import {
 import { appendRunMessage } from '../services/auto.js';
 import { runCursorSdkPrompt } from './cursor-sdk-runner.js';
 import { runOpenCodePrompt } from './opencode-runner.js';
+import { isOpenCodeCliInstalled, OPENCODE_CLI_INSTALL_HINT } from './opencode-cli.js';
 import { buildRunnerPrompt } from './prompt.js';
 import {
   getRunnerConcurrency,
   getRunnerProvider,
-  isRunnerConfigured,
+  isCursorRunnerConfigured,
+  isOpenCodeRunnerConfigured,
   type RunnerJob,
   type RunnerJobStatus,
   type RunnerProvider,
@@ -24,6 +26,7 @@ import {
 const jobs = new Map<string, RunnerJob>();
 const queue: string[] = [];
 const controllers = new Map<string, AbortController>();
+const postedBlockHints = new Set<string>();
 let activeCount = 0;
 
 function now() {
@@ -48,11 +51,25 @@ function missingKeyMessage(provider: RunnerProvider): string {
     : '未配置 CURSOR_API_KEY，無法啟動 Cursor SDK Runner';
 }
 
+function runnerBlockReason(provider: RunnerProvider): string | null {
+  if (provider === 'opencode') {
+    if (!isOpenCodeRunnerConfigured()) return missingKeyMessage(provider);
+    if (!isOpenCodeCliInstalled()) return OPENCODE_CLI_INSTALL_HINT;
+    return null;
+  }
+  if (!isCursorRunnerConfigured()) return missingKeyMessage(provider);
+  return null;
+}
+
 export function getRunnerStatus(projectId: string) {
   const provider = getRunnerProvider();
+  const hint = runnerBlockReason(provider);
   return {
     provider,
-    configured: isRunnerConfigured(provider),
+    configured: provider === 'opencode' ? isOpenCodeRunnerConfigured() : isCursorRunnerConfigured(),
+    cliInstalled: provider !== 'opencode' || isOpenCodeCliInstalled(),
+    ready: hint === null,
+    hint,
     concurrency: getRunnerConcurrency(),
     jobs: listJobsForProject(projectId),
   };
@@ -72,7 +89,8 @@ export function enqueueRunnerJob(input: {
   );
   if (existing) return existing;
 
-  if (!isRunnerConfigured(provider)) {
+  const blocked = runnerBlockReason(provider);
+  if (blocked) {
     const failed: RunnerJob = {
       id: uuidv4(),
       projectId: input.projectId,
@@ -81,17 +99,17 @@ export function enqueueRunnerJob(input: {
       status: 'failed',
       agentName: provider,
       provider,
-      error: missingKeyMessage(provider),
+      error: blocked,
       createdAt: now(),
       updatedAt: now(),
     };
     jobs.set(failed.id, failed);
     if (input.autoRunId) {
-      appendRunMessage(
-        input.autoRunId,
-        'system',
-        `任務 ${input.taskId} Runner 失敗：${missingKeyMessage(provider)}`,
-      );
+      const key = `${input.autoRunId}:${blocked}`;
+      if (!postedBlockHints.has(key)) {
+        postedBlockHints.add(key);
+        appendRunMessage(input.autoRunId, 'system', blocked);
+      }
     }
     return failed;
   }
