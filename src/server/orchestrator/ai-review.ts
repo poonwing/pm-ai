@@ -101,9 +101,14 @@ function resolveReviewer(projectId: string, task: ReturnType<typeof getTask>) {
 
 function buildChangeContext(projectId: string, taskId: string): string {
   try {
+    const task = getTask(projectId, taskId);
     const summary = getTaskChanges(projectId, taskId);
     const lines: string[] = [
       `變更模式: ${summary.mode}`,
+      `任務分支: ${task.git_branch ?? '（無）'}`,
+      `isolation_status: ${task.isolation_status ?? 'none'}`,
+      `execution_path: ${task.execution_path ?? task.worktree_path ?? '（主 workspace）'}`,
+      `對照: ${summary.base_label || '—'} → ${summary.head_label || '—'}`,
       summary.warning ? `警告: ${summary.warning}` : '',
       `統計: ${summary.stats.files} 檔 +${summary.stats.additions}/-${summary.stats.deletions}`,
       '',
@@ -134,11 +139,16 @@ function buildChangeContext(projectId: string, taskId: string): string {
     }
     if (patches.length) {
       lines.push('', '部分 diff：', ...patches);
+    } else if (!summary.files.length) {
+      lines.push(
+        '',
+        '（目前看不到對應任務分支/worktree 的變更。請勿因空 diff 就 reject；證據不足時傾向 approve 並在 note 說明。）',
+      );
     }
     return lines.filter(Boolean).join('\n');
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return `（無法讀取變更：${msg}）`;
+    return `（無法讀取變更：${msg}。證據不足時勿反覆 reject。）`;
   }
 }
 

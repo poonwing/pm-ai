@@ -274,6 +274,28 @@ export interface WorkspaceGitStatus {
   branches: WorkspaceGitBranch[];
 }
 
+export interface WorkspaceDirEntry {
+  name: string;
+  path: string;
+  type: 'file' | 'dir';
+  size?: number;
+  mtime?: string;
+}
+
+export interface WorkspaceDirListResponse {
+  path: string;
+  entries: WorkspaceDirEntry[];
+}
+
+export interface WorkspaceFileContentResponse {
+  path: string;
+  content: string | null;
+  encoding: 'utf-8' | null;
+  size: number;
+  binary: boolean;
+  too_large: boolean;
+}
+
 export const projectsApi = {
   list: () => api<Project[]>('/projects'),
   get: (id: string) => api<Project>(`/projects/${id}`),
@@ -319,6 +341,16 @@ export const projectsApi = {
       method: 'POST',
       body: JSON.stringify({ branch }),
     }),
+  listFiles: (id: string, path = '') => {
+    const params = new URLSearchParams();
+    if (path) params.set('path', path);
+    const qs = params.toString();
+    return api<WorkspaceDirListResponse>(`/projects/${id}/files${qs ? `?${qs}` : ''}`);
+  },
+  getFileContent: (id: string, path: string) => {
+    const params = new URLSearchParams({ path });
+    return api<WorkspaceFileContentResponse>(`/projects/${id}/files/content?${params}`);
+  },
 };
 
 export const tasksApi = {

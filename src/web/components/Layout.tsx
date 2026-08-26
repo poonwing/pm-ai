@@ -123,6 +123,16 @@ export function Layout() {
               任務
             </NavLink>
             <NavLink
+              to={`/projects/${projectId}/files`}
+              className={({ isActive }) =>
+                `block px-3 py-2 rounded-md text-sm transition-colors ${
+                  isActive ? 'bg-accent font-medium' : 'text-muted-foreground hover:bg-accent/50'
+                }`
+              }
+            >
+              文件
+            </NavLink>
+            <NavLink
               to={`/projects/${projectId}/agents`}
               className={({ isActive }) =>
                 `block px-3 py-2 rounded-md text-sm transition-colors ${

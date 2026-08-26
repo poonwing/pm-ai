@@ -421,6 +421,19 @@ export const FileDiffResponseSchema = z.object({
 
 export type FileDiffResponse = z.infer<typeof FileDiffResponseSchema>;
 
+export const FileContentResponseSchema = z.object({
+  path: z.string(),
+  status: z.string(),
+  content: z.string(),
+  truncated: z.boolean(),
+  binary: z.boolean(),
+  missing: z.boolean(),
+  label: z.string(),
+  from: z.enum(['worktree', 'base', 'head', 'branch']),
+});
+
+export type FileContentResponse = z.infer<typeof FileContentResponseSchema>;
+
 export const CheckoutBranchSchema = z.object({
   branch: z.string().min(1),
 });
@@ -492,3 +505,31 @@ export const MergeTaskBranchResultSchema = z.object({
 });
 
 export type MergeTaskBranchResult = z.infer<typeof MergeTaskBranchResultSchema>;
+
+export const WorkspaceDirEntrySchema = z.object({
+  name: z.string(),
+  path: z.string(),
+  type: z.enum(['file', 'dir']),
+  size: z.number().int().nonnegative().optional(),
+  mtime: z.string().optional(),
+});
+
+export type WorkspaceDirEntry = z.infer<typeof WorkspaceDirEntrySchema>;
+
+export const WorkspaceDirListResponseSchema = z.object({
+  path: z.string(),
+  entries: z.array(WorkspaceDirEntrySchema),
+});
+
+export type WorkspaceDirListResponse = z.infer<typeof WorkspaceDirListResponseSchema>;
+
+export const WorkspaceFileContentResponseSchema = z.object({
+  path: z.string(),
+  content: z.string().nullable(),
+  encoding: z.literal('utf-8').nullable(),
+  size: z.number().int().nonnegative(),
+  binary: z.boolean(),
+  too_large: z.boolean(),
+});
+
+export type WorkspaceFileContentResponse = z.infer<typeof WorkspaceFileContentResponseSchema>;

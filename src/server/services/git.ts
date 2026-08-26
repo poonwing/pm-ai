@@ -543,6 +543,91 @@ export function getFileDiffAgainstHead(repoPath: string, filePath: string): { pa
   return { patch, binary };
 }
 
+const MAX_SHOW_BYTES = 2 * 1024 * 1024;
+
+function isBinaryBuffer(buf: Buffer): boolean {
+  const sample = buf.subarray(0, Math.min(buf.length, 8000));
+  if (sample.includes(0)) return true;
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(sample);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function readGitShowBuffer(
+  repoPath: string,
+  args: string[],
+): { ok: true; buf: Buffer } | { ok: false } {
+  try {
+    const buf = execFileSync('git', ['-C', repoPath, ...args], {
+      encoding: 'buffer',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      maxBuffer: MAX_SHOW_BYTES,
+    }) as Buffer;
+    return { ok: true, buf };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** Read file content at a commit / tree-ish (does not trim newlines). */
+export function getFileContentAtRef(
+  repoPath: string,
+  ref: string,
+  filePath: string,
+): { content: string; binary: boolean; missing: boolean } {
+  const normalized = assertRepoRelativePath(filePath);
+  const result = readGitShowBuffer(repoPath, ['show', `${ref}:${normalized}`]);
+  if (!result.ok) {
+    return { content: '', binary: false, missing: true };
+  }
+  if (isBinaryBuffer(result.buf)) {
+    return { content: '', binary: true, missing: false };
+  }
+  return { content: result.buf.toString('utf-8'), binary: false, missing: false };
+}
+
+/** Read file from a working tree / worktree path on disk. */
+export function getWorkingTreeFileContent(
+  repoPath: string,
+  filePath: string,
+): { content: string; binary: boolean; missing: boolean } {
+  const normalized = assertRepoRelativePath(filePath);
+  const absolute = path.resolve(repoPath, normalized);
+  const root = path.resolve(repoPath);
+  if (absolute !== root && !absolute.startsWith(root + path.sep)) {
+    return { content: '', binary: false, missing: true };
+  }
+  if (!fs.existsSync(absolute)) {
+    return { content: '', binary: false, missing: true };
+  }
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(absolute);
+  } catch {
+    return { content: '', binary: false, missing: true };
+  }
+  if (!stat.isFile()) {
+    return { content: '', binary: false, missing: true };
+  }
+  if (stat.size > MAX_SHOW_BYTES) {
+    // Treat oversized as binary-ish so callers don't dump huge payloads
+    return { content: '', binary: true, missing: false };
+  }
+  let buf: Buffer;
+  try {
+    buf = fs.readFileSync(absolute);
+  } catch {
+    return { content: '', binary: false, missing: true };
+  }
+  if (isBinaryBuffer(buf)) {
+    return { content: '', binary: true, missing: false };
+  }
+  return { content: buf.toString('utf-8'), binary: false, missing: false };
+}
+
 export function assertRepoRelativePath(filePath: string): string {
   const normalized = filePath.replace(/\\/g, '/').trim();
   if (!normalized || normalized.includes('..') || path.isAbsolute(normalized)) {

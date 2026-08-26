@@ -43,6 +43,7 @@ import {
   checkoutWorkspaceBranch,
   getWorkspaceGitStatus,
 } from './services/workspace-git.js';
+import { listWorkspaceDir, readWorkspaceFile } from './services/workspace-files.js';
 import {
   ConflictError,
   NotFoundError,
@@ -308,6 +309,25 @@ app.post(
     }
   },
 );
+
+app.get('/api/v1/projects/:id/files/content', authMiddleware('human'), (c) => {
+  try {
+    const pathParam = c.req.query('path');
+    if (!pathParam) throw new ValidationError('需要 path 參數');
+    return c.json(readWorkspaceFile(requireParam(c, 'id'), pathParam));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.get('/api/v1/projects/:id/files', authMiddleware('human'), (c) => {
+  try {
+    const pathParam = c.req.query('path') ?? '';
+    return c.json(listWorkspaceDir(requireParam(c, 'id'), pathParam));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
 
 // Tasks - list & create
 app.get('/api/v1/projects/:id/tasks', authMiddleware('any'), (c) => {
