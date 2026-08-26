@@ -17,8 +17,9 @@ import {
 import { CUSTOM_DECISION_OPTION_ID } from '../../shared/schemas.js';
 import {
   createStaffAgent,
-  ensureOrchestratorAgent,
+  ensureDefaultStaffAgents,
   listStaffAgents,
+  updateStaffAgent,
 } from '../services/agents.js';
 import {
   createTask,
@@ -334,24 +335,12 @@ async function buildPlan(
   goal: string,
   history: Array<{ role: string; content: string }>,
   policy: ReviewPolicy,
+  existingStaff: Array<{ name: string; role: string; system_prompt: string }>,
 ): Promise<OrchestratorPlan> {
   if (!isModelConfigured()) {
     return {
-      summary: `離線規劃（未配置 GLM）：圍繞「${goal}」建立基礎開發與測試員工與任務。`,
-      staff: [
-        {
-          name: '開發者',
-          role: 'developer',
-          system_prompt: `你是 ${projectName} 的開發者。目標：${goal}。只在 execution_path 改代碼，完成前 commit。`,
-          skills_tags: ['code'],
-        },
-        {
-          name: '測試者',
-          role: 'tester',
-          system_prompt: `你是 ${projectName} 的測試者。驗證：${goal}。`,
-          skills_tags: ['test'],
-        },
-      ],
+      summary: `離線規劃（未配置模型）：圍繞「${goal}」分派既有開發與測試員工。`,
+      staff: [],
       tasks: [
         {
           title: `實現：${goal.slice(0, 40)}`,
@@ -373,10 +362,28 @@ async function buildPlan(
     };
   }
 
+  const staffRoster = existingStaff
+    .map((s) => {
+      const promptPreview =
+        s.system_prompt.length > 160 ? `${s.system_prompt.slice(0, 160)}…` : s.system_prompt;
+      return `- ${s.name} (role=${s.role}): ${promptPreview}`;
+    })
+    .join('\n');
+
   const system = `你是 PM-AI 專案協調者。根據專案與用戶目標輸出 JSON 計劃（不要 markdown 說明）。
 專案：${projectName}
 描述：${projectDesc || '（無）'}
 預設審查：${policy.default_reviewer_type}
+
+專案已有固定可分派員工（優先使用，不要重複建立同 role）：
+${staffRoster || '（尚無）'}
+
+規則：
+- tasks.role 必須對應上列既有 role，或你在 staff 裡擬新增的非常規 role
+- staff 陣列僅用於：(1) 依本目標微調既有角色的 system_prompt；(2) 缺職能時新增非常規角色
+- 不需要調整提示詞時 staff 可為 []
+- 常用既有 role：analyst / designer / developer / tester / reviewer
+
 JSON schema:
 {
   "summary": string,
@@ -386,8 +393,7 @@ JSON schema:
   "decision": {"title","summary","options":[{"id","label","description"}],"recommended_option_id"} | null,
   "need_meeting": boolean,
   "meeting_topic": string | null
-}
-role 常用：developer/tester/designer/reviewer。tasks.role 須對應 staff.role。`;
+}`;
 
   const userParts = [
     `目標：${goal}`,
@@ -405,7 +411,7 @@ role 常用：developer/tester/designer/reviewer。tasks.role 須對應 staff.ro
 }
 
 export async function startOrchestratorRun(projectId: string, goal: string) {
-  ensureOrchestratorAgent(projectId);
+  ensureDefaultStaffAgents(projectId);
   updateProject(projectId, { run_mode: 'auto' });
   const run = createAutoRun(projectId, goal);
   if (isStartWorkRequest(goal)) {
@@ -530,7 +536,7 @@ async function tickOrchestratorUnlocked(
   }
 
   const project = getProject(run.project_id);
-  ensureOrchestratorAgent(run.project_id);
+  ensureDefaultStaffAgents(run.project_id);
   const policy = getReviewPolicy(run.project_id);
   const history = getAutoRunMessages(runId);
 
@@ -618,14 +624,20 @@ async function tickOrchestratorUnlocked(
   }
 
   updateAutoRun(runId, { phase: 'plan', status: 'running' });
-  appendRunMessage(runId, 'assistant', '正在規劃員工與任務…');
+  appendRunMessage(runId, 'assistant', '正在規劃任務分派…');
 
+  const roster = listStaffAgents(run.project_id, { assignableOnly: true });
   const plan = await buildPlan(
     project.name,
     project.description ?? '',
     run.goal,
     history,
     getReviewPolicy(run.project_id),
+    roster.map((s) => ({
+      name: s.name,
+      role: s.role,
+      system_prompt: s.system_prompt,
+    })),
   );
 
   appendRunMessage(runId, 'assistant', plan.summary || '計劃已生成');
@@ -690,12 +702,38 @@ async function tickOrchestratorUnlocked(
   }
 
   updateAutoRun(runId, { phase: 'ensure_staff' });
+  ensureDefaultStaffAgents(run.project_id);
   const existing = listStaffAgents(run.project_id);
-  const byRole = new Map(existing.filter((e) => e.assignable).map((e) => [e.role, e]));
+  const byRole = new Map(
+    existing
+      .filter((e) => e.assignable && e.status !== 'retired' && e.role !== 'orchestrator')
+      .map((e) => [e.role, e]),
+  );
 
   for (const s of plan.staff ?? []) {
     if (s.role === 'orchestrator') continue;
-    if (byRole.has(s.role)) continue;
+    const current = byRole.get(s.role);
+    if (current) {
+      const nextPrompt = (s.system_prompt ?? '').trim();
+      if (nextPrompt && nextPrompt !== current.system_prompt.trim()) {
+        const updated = updateStaffAgent(
+          current.id,
+          {
+            system_prompt: nextPrompt,
+            ...(s.skills_tags?.length ? { skills_tags: s.skills_tags } : {}),
+            ...(s.name?.trim() ? { name: s.name.trim() } : {}),
+          },
+          'orchestrator',
+        );
+        byRole.set(s.role, updated as never);
+        appendRunMessage(
+          runId,
+          'assistant',
+          `已依目標調整 ${updated.name}（${updated.role}）提示詞`,
+        );
+      }
+      continue;
+    }
     const created = createStaffAgent(
       run.project_id,
       {
@@ -704,32 +742,11 @@ async function tickOrchestratorUnlocked(
         system_prompt: s.system_prompt,
         skills_tags: s.skills_tags ?? [],
         assignable: true,
-        creation_rationale: `協調者依目標「${run.goal}」建立`,
+        creation_rationale: `協調者依目標「${run.goal}」新增非常規角色`,
       },
       'orchestrator',
     );
     byRole.set(s.role, created as never);
-    appendRunMessage(runId, 'assistant', `已建立員工 ${created.name}（${created.role}）`);
-  }
-
-  const needsAgentReviewer =
-    (plan.tasks ?? []).some((t) => t.reviewer_type === 'agent') ||
-    getReviewPolicy(run.project_id).default_reviewer_type === 'agent';
-  if (needsAgentReviewer && !byRole.has('reviewer')) {
-    const created = createStaffAgent(
-      run.project_id,
-      {
-        name: 'Reviewer',
-        role: 'reviewer',
-        system_prompt:
-          '你是嚴格的程式碼審查者。對照驗收標準檢查交付是否完整、正確、可維護；不通過就明確指出問題。',
-        skills_tags: ['review'],
-        assignable: true,
-        creation_rationale: '協調者為 AI 復查自動建立 reviewer',
-      },
-      'orchestrator',
-    );
-    byRole.set('reviewer', created as never);
     appendRunMessage(runId, 'assistant', `已建立員工 ${created.name}（${created.role}）`);
   }
 

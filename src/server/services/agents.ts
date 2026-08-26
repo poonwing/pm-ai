@@ -7,6 +7,9 @@ import type {
   UpdateStaffAgentSchema,
 } from '../../shared/schemas.js';
 import type { z } from 'zod';
+import { DEFAULT_ASSIGNABLE_STAFF } from './default-staff.js';
+
+export { DEFAULT_ASSIGNABLE_STAFF } from './default-staff.js';
 
 function now() {
   return new Date().toISOString();
@@ -92,18 +95,58 @@ export function ensureOrchestratorAgent(projectId: string) {
       name: '協調者',
       role: 'orchestrator',
       systemPrompt:
-        '你是專案協調者（Orchestrator）。你負責理解人類目標、規劃任務、建立/分派 AI 員工、必要時開會或提出決策選項請人類拍板。你不直接改業務程式碼；分派時只使用 assignable=true 的員工。',
+        '你是專案協調者（Orchestrator）。你負責理解人類目標、規劃任務、分派固定 AI 員工。優先使用專案既有可分派員工；可依目標微調其 system_prompt，僅在缺職能時新建非常規角色。必要時開會或提出決策選項請人類拍板。你不直接改業務程式碼；分派時只使用 assignable=true 的員工。',
       skillsTags: '[]',
       status: 'idle',
       assignable: false,
       createdBy: 'system',
-      promptSource: 'orchestrator_generated',
+      promptSource: 'system_default',
       creationRationale: '系統預設協調者',
       createdAt: ts,
       updatedAt: ts,
     })
     .run();
   return getStaffAgent(id);
+}
+
+/** Seed fixed assignable staff (idempotent). Retired-only roles are re-seeded. */
+export function ensureDefaultStaffAgents(projectId: string) {
+  ensureOrchestratorAgent(projectId);
+  const db = getDb();
+  const rows = db
+    .select()
+    .from(schema.staffAgents)
+    .where(eq(schema.staffAgents.projectId, projectId))
+    .all();
+
+  const activeRoles = new Set(
+    rows.filter((r) => r.status !== 'retired').map((r) => r.role),
+  );
+
+  for (const preset of DEFAULT_ASSIGNABLE_STAFF) {
+    if (activeRoles.has(preset.role)) continue;
+    const ts = now();
+    const id = uuidv4();
+    db.insert(schema.staffAgents)
+      .values({
+        id,
+        projectId,
+        name: preset.name,
+        role: preset.role,
+        systemPrompt: preset.system_prompt,
+        skillsTags: JSON.stringify(preset.skills_tags),
+        status: 'idle',
+        assignable: true,
+        createdBy: 'system',
+        promptSource: 'system_default',
+        creationRationale: '專案預設固定角色',
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .run();
+    activeRoles.add(preset.role);
+  }
+  return listStaffAgents(projectId);
 }
 
 export function createStaffAgent(
@@ -155,8 +198,12 @@ export function updateStaffAgent(
   }
 
   let promptSource = row.promptSource;
-  if (input.system_prompt !== undefined && editor === 'human') {
-    promptSource = row.promptSource === 'human_written' ? 'human_written' : 'human_edited';
+  if (input.system_prompt !== undefined) {
+    if (editor === 'human') {
+      promptSource = row.promptSource === 'human_written' ? 'human_written' : 'human_edited';
+    } else if (editor === 'orchestrator') {
+      promptSource = 'orchestrator_edited';
+    }
   }
 
   db.update(schema.staffAgents)

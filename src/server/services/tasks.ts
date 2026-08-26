@@ -424,6 +424,10 @@ export function createProject(input: z.infer<typeof CreateProjectSchema>) {
 
   db.insert(schema.projects).values(projectRow).run();
   syncProjectTasks(config.id, normalizedPath);
+  // Seed fixed staff when agents module is available (also called from POST /projects).
+  void import('./agents.js')
+    .then((m) => m.ensureDefaultStaffAgents(config.id))
+    .catch(() => undefined);
   return { ...projectRow, config, skillInstall };
 }
 
@@ -1306,6 +1310,82 @@ export function reinstallProjectSkill(projectId: string) {
     throw new ValidationError(skillInstall.error ?? 'Skill 安裝失敗');
   }
   return skillInstall;
+}
+
+/**
+ * Ensure an existing bound project is ready for PM-AI use:
+ * .pm-ai structure, project.yml, Cursor skill, git root refresh, task sync.
+ */
+export function initializeProject(projectId: string) {
+  const project = getProject(projectId);
+  if (project.bindingStatus !== 'ok') {
+    throw new ValidationError('workspace 不可用，請先重新定位資料夾');
+  }
+
+  const workspacePath = project.workspacePath;
+  const structureWasMissing = !fs.existsSync(getPmAiDir(workspacePath));
+  ensurePmAiStructure(workspacePath);
+
+  const existingConfig = readProjectConfig(workspacePath);
+  let configCreated = false;
+
+  if (existingConfig) {
+    if (existingConfig.id !== projectId) {
+      throw new ValidationError(
+        `workspace 的 project.yml id（${existingConfig.id}）與此專案不符`,
+      );
+    }
+    writeProjectConfig(workspacePath, {
+      ...existingConfig,
+      name: project.name,
+      description: project.description,
+      status: project.archived ? 'archived' : 'active',
+    });
+  } else {
+    configCreated = true;
+    writeProjectConfig(workspacePath, {
+      id: projectId,
+      name: project.name,
+      description: project.description,
+      schema_version: 1,
+      created_at: project.createdAt,
+      status: project.archived ? 'archived' : 'active',
+      task_id_prefix: 'TASK',
+      next_task_seq: 1,
+      preview_command: DEFAULT_PREVIEW_COMMAND,
+      preview_install_command: DEFAULT_PREVIEW_INSTALL_COMMAND,
+      preview_install_if_needed: true,
+      preview_workdir: '',
+      run_mode: 'manual',
+    });
+  }
+
+  const skillInstall = installPmAiSkill(workspacePath);
+  if (!skillInstall.installed) {
+    throw new ValidationError(skillInstall.error ?? 'Skill 安裝失敗');
+  }
+
+  const gitRoot = findGitRoot(workspacePath);
+  const db = getDb();
+  db.update(schema.projects)
+    .set({
+      gitRoot: gitRoot ? normalizePath(gitRoot) : null,
+      pathLastSeenAt: now(),
+      bindingStatus: 'ok',
+    })
+    .where(eq(schema.projects.id, projectId))
+    .run();
+
+  syncProjectTasks(projectId, workspacePath);
+
+  return {
+    project: getProject(projectId),
+    structure_ensured: true,
+    structure_was_missing: structureWasMissing,
+    config_created: configCreated,
+    skill: skillInstall,
+    git_root: gitRoot ? normalizePath(gitRoot) : null,
+  };
 }
 
 export function retryTaskIsolation(projectId: string, taskId: string) {

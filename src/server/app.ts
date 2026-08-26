@@ -246,7 +246,9 @@ app.get('/api/v1/projects/:id/dashboard', authMiddleware('any'), (c) => {
 app.post('/api/v1/projects', authMiddleware('human'), zValidator('json', CreateProjectSchema), (c) => {
   try {
     const body = c.req.valid('json');
-    return c.json(taskService.createProject(body), 201);
+    const project = taskService.createProject(body);
+    agentsService.ensureDefaultStaffAgents(project.id);
+    return c.json(project, 201);
   } catch (err) {
     return errorResponse(c, err);
   }
@@ -283,6 +285,14 @@ app.post('/api/v1/projects/:id/relocate', authMiddleware('human'), zValidator('j
 app.post('/api/v1/projects/:id/skill/reinstall', authMiddleware('human'), (c) => {
   try {
     return c.json(taskService.reinstallProjectSkill(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post('/api/v1/projects/:id/initialize', authMiddleware('human'), (c) => {
+  try {
+    return c.json(taskService.initializeProject(requireParam(c, 'id')));
   } catch (err) {
     return errorResponse(c, err);
   }
@@ -747,7 +757,7 @@ app.get('/api/v1/meta/model', authMiddleware('any'), (c) => {
 
 app.get('/api/v1/projects/:id/agents', authMiddleware('any'), (c) => {
   try {
-    agentsService.ensureOrchestratorAgent(requireParam(c, 'id'));
+    agentsService.ensureDefaultStaffAgents(requireParam(c, 'id'));
     return c.json(agentsService.listStaffAgents(requireParam(c, 'id')));
   } catch (err) {
     return errorResponse(c, err);

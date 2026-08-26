@@ -23,6 +23,7 @@ export function ProjectSettingsPage() {
   const [error, setError] = useState('');
   const [picking, setPicking] = useState(false);
   const [skillLoading, setSkillLoading] = useState(false);
+  const [initLoading, setInitLoading] = useState(false);
   const [previewCommand, setPreviewCommand] = useState('npm run dev');
   const [previewInstallCommand, setPreviewInstallCommand] = useState('npm install');
   const [previewInstallIfNeeded, setPreviewInstallIfNeeded] = useState(true);
@@ -212,6 +213,49 @@ export function ProjectSettingsPage() {
           啟動前自動安裝依賴（cwd 有 package.json 且無 node_modules 時）
         </label>
         <Button onClick={save}>儲存預覽設定</Button>
+      </div>
+
+      <hr className="border-border" />
+
+      <div className="flex flex-col gap-3">
+        <h2 className="text-sm font-semibold">初始化專案</h2>
+        <p className="text-xs text-muted-foreground">
+          補齊 PM-AI 所需檔案與目錄（若缺失）：
+          <code className="font-mono">.pm-ai/</code> 結構、
+          <code className="font-mono">project.yml</code>、Cursor Skill，並重新偵測 Git 根目錄、同步任務。
+          不會覆蓋已有任務內容；若已有設定檔會與目前專案名稱對齊。
+        </p>
+        <Button
+          variant="outline"
+          disabled={initLoading || project.bindingStatus === 'missing'}
+          onClick={async () => {
+            if (!projectId) return;
+            setInitLoading(true);
+            setError('');
+            try {
+              const result = await projectsApi.initialize(projectId);
+              setProject(result.project);
+              reloadProjects();
+              const parts: string[] = [];
+              if (result.structure_was_missing) parts.push('已建立 .pm-ai');
+              else parts.push('.pm-ai 已就緒');
+              if (result.config_created) parts.push('已建立 project.yml');
+              else parts.push('project.yml 已同步');
+              parts.push(result.skill.updated ? 'Skill 已更新' : 'Skill 已就緒');
+              if (result.git_root) parts.push('已偵測 Git');
+              else parts.push('未偵測到 Git');
+              setMessage(parts.join(' · '));
+              setTimeout(() => setMessage(''), 5000);
+              toast.success('專案已初始化');
+            } catch (err) {
+              setError(err instanceof Error ? err.message : '初始化失敗');
+            } finally {
+              setInitLoading(false);
+            }
+          }}
+        >
+          {initLoading ? '初始化中…' : '初始化專案'}
+        </Button>
       </div>
 
       <hr className="border-border" />

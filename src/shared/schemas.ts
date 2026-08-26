@@ -29,9 +29,10 @@ export type RunMode = (typeof RUN_MODES)[number];
 
 export const AGENT_ROLES = [
   'orchestrator',
+  'analyst',
+  'designer',
   'developer',
   'tester',
-  'designer',
   'reviewer',
 ] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number] | (string & {});
@@ -40,7 +41,9 @@ export const STAFF_STATUSES = ['idle', 'working', 'blocked', 'retired'] as const
 export type StaffStatus = (typeof STAFF_STATUSES)[number];
 
 export const PROMPT_SOURCES = [
+  'system_default',
   'orchestrator_generated',
+  'orchestrator_edited',
   'human_written',
   'human_edited',
 ] as const;

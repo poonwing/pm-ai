@@ -3,12 +3,28 @@ import { useParams } from 'react-router-dom';
 import { agentsApi, StaffAgent } from '../lib/api';
 import { Button, Input, Textarea, Label, Dialog, Badge } from '../components/ui';
 
+const ROLE_OPTIONS = [
+  'analyst',
+  'designer',
+  'developer',
+  'tester',
+  'reviewer',
+] as const;
+
+const PROMPT_SOURCE_LABEL: Record<string, string> = {
+  system_default: '系統預設',
+  orchestrator_generated: '協調者建立',
+  orchestrator_edited: '協調者調整',
+  human_written: '人工撰寫',
+  human_edited: '人工編輯',
+};
+
 const emptyForm = () => ({
   name: '',
   role: 'developer',
   system_prompt: '',
   skills_tags: '',
-  assignable: false,
+  assignable: true,
 });
 
 export function AgentsPage() {
@@ -108,7 +124,7 @@ export function AgentsPage() {
         <div>
           <h1 className="text-xl font-semibold">AI 員工</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            管理角色與提示詞；打開「允許分派」後，協調者才能派任務給該員工。
+            專案預設會帶入固定角色（需求分析、設計、開發、測試、審查）。可編輯提示詞；打開「允許分派」後協調者才能派任務。
           </p>
         </div>
         <Button onClick={openCreate}>新建員工</Button>
@@ -134,7 +150,7 @@ export function AgentsPage() {
                     <Badge className="bg-amber-100 text-amber-800">未開放分派</Badge>
                   )}
                   <span className="text-xs text-muted-foreground">
-                    by {a.created_by} · {a.prompt_source}
+                    by {a.created_by} · {PROMPT_SOURCE_LABEL[a.prompt_source] ?? a.prompt_source}
                   </span>
                 </div>
                 {a.creation_rationale && (
@@ -165,7 +181,9 @@ export function AgentsPage() {
           </div>
         ))}
         {agents.length === 0 && (
-          <p className="text-sm text-muted-foreground">尚無員工。可新建，或在 Auto 模式讓協調者生成。</p>
+          <p className="text-sm text-muted-foreground">
+            尚無員工。重新整理此頁會自動補齊專案預設角色。
+          </p>
         )}
       </div>
 
@@ -185,12 +203,38 @@ export function AgentsPage() {
           </div>
           <div>
             <Label>角色</Label>
-            <Input
-              className="mt-1"
-              value={form.role}
-              onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))}
-              placeholder="developer / tester / designer / reviewer"
-            />
+            <select
+              className="mt-1 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm"
+              value={
+                ROLE_OPTIONS.includes(form.role as (typeof ROLE_OPTIONS)[number])
+                  ? form.role
+                  : '__custom__'
+              }
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === '__custom__') {
+                  setForm((f) => ({ ...f, role: f.role && !ROLE_OPTIONS.includes(f.role as never) ? f.role : '' }));
+                } else {
+                  setForm((f) => ({ ...f, role: v }));
+                }
+              }}
+            >
+              {ROLE_OPTIONS.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+              <option value="__custom__">自訂…</option>
+            </select>
+            {(!ROLE_OPTIONS.includes(form.role as (typeof ROLE_OPTIONS)[number]) ||
+              form.role === '') && (
+              <Input
+                className="mt-2"
+                value={form.role}
+                onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))}
+                placeholder="自訂 role，例如 security"
+              />
+            )}
           </div>
           <div>
             <Label>系統提示詞</Label>

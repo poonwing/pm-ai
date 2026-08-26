@@ -325,6 +325,15 @@ export const projectsApi = {
       `/projects/${id}/skill/reinstall`,
       { method: 'POST' },
     ),
+  initialize: (id: string) =>
+    api<{
+      project: Project;
+      structure_ensured: boolean;
+      structure_was_missing: boolean;
+      config_created: boolean;
+      skill: { installed: boolean; skillPath: string | null; updated: boolean };
+      git_root: string | null;
+    }>(`/projects/${id}/initialize`, { method: 'POST' }),
   dashboard: (id: string) => api<Dashboard>(`/projects/${id}/dashboard`),
   delete: (id: string, options?: { force?: boolean }) => {
     const params = new URLSearchParams();
