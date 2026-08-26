@@ -183,10 +183,29 @@ export function AutoPage() {
     await load();
   };
 
-  const confirmPolicy = async () => {
+  const REVIEWER_OPTIONS = [
+    { value: 'human', label: 'human（人類）' },
+    { value: 'agent', label: 'agent（AI 員工）' },
+    { value: 'orchestrator', label: 'orchestrator' },
+    { value: 'none', label: 'none（不審查）' },
+  ] as const;
+
+  const savePolicy = async (confirm: boolean) => {
     if (!projectId || !policy) return;
-    await autoApi.updatePolicy(projectId, policy, true);
-    await load();
+    setBusy(true);
+    setError('');
+    try {
+      await autoApi.updatePolicy(
+        projectId,
+        { default_reviewer_type: policy.default_reviewer_type },
+        confirm,
+      );
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '更新 Review Policy 失敗');
+    } finally {
+      setBusy(false);
+    }
   };
 
   const activeRun = runs.find((r) => r.id === activeRunId);
@@ -253,12 +272,37 @@ export function AutoPage() {
         <p className="text-sm text-muted-foreground whitespace-pre-wrap">
           {policy?.human_verify_notes}
         </p>
-        <p className="text-xs">預設審查：{policy?.default_reviewer_type}</p>
-        {!policy?.confirmed && (
-          <Button size="sm" onClick={confirmPolicy}>
-            確認協定
-          </Button>
-        )}
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="flex flex-col gap-1 min-w-[12rem]">
+            <Label htmlFor="default-reviewer-type">預設審查</Label>
+            <select
+              id="default-reviewer-type"
+              className="text-sm border border-border rounded-md px-2 py-1.5 bg-background"
+              value={policy?.default_reviewer_type ?? 'human'}
+              disabled={!policy || busy}
+              onChange={(e) =>
+                setPolicy((prev) =>
+                  prev ? { ...prev, default_reviewer_type: e.target.value } : prev,
+                )
+              }
+            >
+              {REVIEWER_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          {policy?.confirmed ? (
+            <Button size="sm" disabled={busy || !policy} onClick={() => savePolicy(false)}>
+              儲存
+            </Button>
+          ) : (
+            <Button size="sm" disabled={busy || !policy} onClick={() => savePolicy(true)}>
+              確認協定
+            </Button>
+          )}
+        </div>
       </section>
 
       {decisions.filter((d) => d.status === 'open').length > 0 && (

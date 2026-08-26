@@ -281,6 +281,8 @@ function createIsolatedOpencodeServer(options: {
   fs.mkdirSync(path.join(dataHome, 'opencode'), { recursive: true });
 
   const args = ['serve', `--hostname=${options.hostname}`, `--port=${options.port}`];
+  // Windows：Node CVE-2024-27980 后直接 spawn .cmd/.bat 会报 spawn EINVAL，需 shell:true
+  const needsShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(options.bin);
   const proc = spawn(options.bin, args, {
     env: {
       ...process.env,
@@ -288,6 +290,8 @@ function createIsolatedOpencodeServer(options: {
       XDG_DATA_HOME: dataHome,
       XDG_STATE_HOME: path.join(dataHome, 'state'),
     },
+    shell: needsShell,
+    windowsHide: true,
   });
 
   const cleanup = () => {

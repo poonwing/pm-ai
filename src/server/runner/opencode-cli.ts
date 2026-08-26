@@ -7,11 +7,35 @@ export const OPENCODE_CLI_INSTALL_HINT =
 
 function isExecutableFile(file: string): boolean {
   try {
-    fs.accessSync(file, fs.constants.X_OK);
+    fs.accessSync(file, fs.constants.F_OK);
     return fs.statSync(file).isFile();
   } catch {
     return false;
   }
+}
+
+/** Node 安全补丁后，Windows 上不能无 shell 直接 spawn .cmd/.bat（会 EINVAL）。 */
+function isWindowsBatchShim(file: string): boolean {
+  return process.platform === 'win32' && /\.(cmd|bat)$/i.test(file);
+}
+
+/**
+ * npm 全局安装的 opencode 常是 PATH 里的 .cmd 包装脚本；
+ * 真实二进制在 node_modules/opencode-ai/bin/opencode.exe。
+ */
+function resolveRealBinary(candidate: string): string | null {
+  if (!isExecutableFile(candidate)) return null;
+  if (!isWindowsBatchShim(candidate)) return candidate;
+
+  const nested = path.join(
+    path.dirname(candidate),
+    'node_modules',
+    'opencode-ai',
+    'bin',
+    'opencode.exe',
+  );
+  if (isExecutableFile(nested)) return nested;
+  return candidate;
 }
 
 function candidateNames(): string[] {
@@ -22,8 +46,13 @@ function candidateNames(): string[] {
 
 function searchDirs(): string[] {
   const home = os.homedir();
+  const npmGlobal =
+    process.platform === 'win32'
+      ? path.join(process.env.APPDATA ?? '', 'npm', 'node_modules', 'opencode-ai', 'bin')
+      : '';
   const extras = [
     process.env.OPENCODE_BIN ? path.dirname(process.env.OPENCODE_BIN) : '',
+    npmGlobal,
     path.join(home, '.opencode', 'bin'),
     path.join(home, '.local', 'bin'),
     path.join(home, 'go', 'bin'),
@@ -36,13 +65,16 @@ function searchDirs(): string[] {
 
 export function getOpenCodeCliPath(): string | null {
   const fromEnv = process.env.OPENCODE_BIN?.trim();
-  if (fromEnv && isExecutableFile(fromEnv)) return fromEnv;
+  if (fromEnv) {
+    const resolved = resolveRealBinary(fromEnv);
+    if (resolved) return resolved;
+  }
 
   const names = candidateNames();
   for (const dir of searchDirs()) {
     for (const name of names) {
-      const candidate = path.join(dir, name);
-      if (isExecutableFile(candidate)) return candidate;
+      const resolved = resolveRealBinary(path.join(dir, name));
+      if (resolved) return resolved;
     }
   }
   return null;

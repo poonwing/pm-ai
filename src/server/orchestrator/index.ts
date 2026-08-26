@@ -579,6 +579,11 @@ async function tickOrchestratorUnlocked(
       options: [
         { id: 'confirm', label: '確認預設協定並繼續' },
         {
+          id: 'agent_default',
+          label: '預設由 AI agent 審查',
+          description: 'default_reviewer_type=agent',
+        },
+        {
           id: 'human_only',
           label: '全部由人類驗收',
           description: 'default_reviewer_type=human',
@@ -786,6 +791,8 @@ export async function handlePolicyDecision(decisionId: string, chosenOptionId: s
         { default_reviewer_type: 'human', human_verify_paths: ['**'] },
         true,
       );
+    } else if (chosenOptionId === 'agent_default') {
+      upsertReviewPolicy(d.project_id, { default_reviewer_type: 'agent' }, true);
     } else if (chosenOptionId === 'custom') {
       upsertReviewPolicy(
         d.project_id,
