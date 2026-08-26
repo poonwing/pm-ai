@@ -916,10 +916,17 @@ export function reopenTask(projectId: string, taskId: string) {
   return transitionTask(projectId, taskId, 'todo', 'human', undefined, { clearClaim: true });
 }
 
-export function approveReview(projectId: string, taskId: string) {
+export function approveReview(
+  projectId: string,
+  taskId: string,
+  opts?: { note?: string; actor?: 'human' | 'agent'; actorName?: string },
+) {
   const task = getTask(projectId, taskId);
   if (!isPendingReview(task)) throw new ValidationError('此任務不在待驗收狀態');
   assertTaskWorktreeNotOnTempBranch(projectId, taskId);
+
+  const actor = opts?.actor ?? 'human';
+  const note = opts?.note?.trim() ?? '';
 
   return updateTaskInternal(
     projectId,
@@ -935,27 +942,38 @@ export function approveReview(projectId: string, taskId: string) {
           note: '',
         }),
         status: 'approved',
+        note: note || fm.review?.note || '',
       };
       logActivity(
         getProject(projectId).workspacePath,
         projectId,
         taskId,
-        'human',
+        actor,
         'reviewed',
-        { summary: '驗收通過' },
+        {
+          actorName: opts?.actorName,
+          summary: note ? `驗收通過：${note.slice(0, 200)}` : '驗收通過',
+        },
       );
       return { frontmatter: fm, body };
     },
-    'human',
+    actor,
+    opts?.actorName,
   );
 }
 
-export function rejectReview(projectId: string, taskId: string, reason: string) {
+export function rejectReview(
+  projectId: string,
+  taskId: string,
+  reason: string,
+  opts?: { actor?: 'human' | 'agent'; actorName?: string },
+) {
   const task = getTask(projectId, taskId);
   if (!isPendingReview(task)) throw new ValidationError('此任務不在待驗收狀態');
   assertTaskWorktreeNotOnTempBranch(projectId, taskId);
 
-  return transitionTask(projectId, taskId, 'todo', 'human', undefined, {
+  const actor = opts?.actor ?? 'human';
+  return transitionTask(projectId, taskId, 'todo', actor, opts?.actorName, {
     reason,
     clearClaim: true,
   });

@@ -339,7 +339,8 @@ export const AGENT_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   draft: [],
   todo: ['in_progress'],
   in_progress: ['done', 'todo'],
-  done: [],
+  /** AI reviewer 可退回重做 */
+  done: ['todo'],
   cancelled: [],
 };
 

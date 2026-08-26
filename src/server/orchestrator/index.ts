@@ -29,7 +29,8 @@ import {
   ValidationError,
 } from '../services/tasks.js';
 import { chatCompletion, isModelConfigured } from './model.js';
-import type { ReviewPolicy } from '../../shared/schemas.js';
+import { dispatchPendingAiReviews } from './ai-review.js';
+import { isPendingReview, type ReviewPolicy } from '../../shared/schemas.js';
 
 export type OrchestratorPhase =
   | 'intake'
@@ -540,8 +541,16 @@ async function tickOrchestratorUnlocked(
     return { run: getAutoRun(runId), messages: history, decisions: open };
   }
 
-  // Already assigned: task events / 推進一步 only synthesize unless forceReplan
+  // Already assigned: dispatch AI reviews + synthesize unless forceReplan
   if (isWaitingPhase(run.phase) && !opts.forceReplan) {
+    const started = dispatchPendingAiReviews(run.project_id, runId);
+    if (started.length) {
+      appendRunMessage(
+        runId,
+        'system',
+        `已啟動 AI 復查：${started.join(', ')}`,
+      );
+    }
     synthesizeProgress(run.project_id, runId);
     return runResult(runId);
   }
@@ -703,6 +712,27 @@ async function tickOrchestratorUnlocked(
     appendRunMessage(runId, 'assistant', `已建立員工 ${created.name}（${created.role}）`);
   }
 
+  const needsAgentReviewer =
+    (plan.tasks ?? []).some((t) => t.reviewer_type === 'agent') ||
+    getReviewPolicy(run.project_id).default_reviewer_type === 'agent';
+  if (needsAgentReviewer && !byRole.has('reviewer')) {
+    const created = createStaffAgent(
+      run.project_id,
+      {
+        name: 'Reviewer',
+        role: 'reviewer',
+        system_prompt:
+          '你是嚴格的程式碼審查者。對照驗收標準檢查交付是否完整、正確、可維護；不通過就明確指出問題。',
+        skills_tags: ['review'],
+        assignable: true,
+        creation_rationale: '協調者為 AI 復查自動建立 reviewer',
+      },
+      'orchestrator',
+    );
+    byRole.set('reviewer', created as never);
+    appendRunMessage(runId, 'assistant', `已建立員工 ${created.name}（${created.role}）`);
+  }
+
   updateAutoRun(runId, { phase: 'assign' });
   const assignable = listStaffAgents(run.project_id, { assignableOnly: true });
   const roleMap = new Map(assignable.map((a) => [a.role, a]));
@@ -742,7 +772,12 @@ async function tickOrchestratorUnlocked(
     appendRunMessage(
       runId,
       'assistant',
-      `已分派 ${task.id} → ${assignee.name}（序 ${t.queue_order}）`,
+      `已分派 ${task.id} → ${assignee.name}（序 ${t.queue_order}）` +
+        (t.reviewer_type === 'agent'
+          ? `，審查者 ${roleMap.get('reviewer')?.name ?? '協調者備援'}`
+          : t.reviewer_type === 'orchestrator'
+            ? '，由協調者復查'
+            : ''),
     );
     const { enqueueRunnerJob } = await import('../runner/index.js');
     enqueueRunnerJob({
@@ -821,8 +856,16 @@ export function synthesizeProgress(projectId: string, runId: string) {
   const tasks = listProjectTasks(projectId);
   const inbox = getInbox().filter((t) => t.projectId === projectId || t.project_id === projectId);
   const done = tasks.filter((t) => t.status === 'done');
-  const pendingReview = done.filter((t) => !t.humanReviewed && t.human_reviewed !== true);
-  const summary = `進度：共 ${tasks.length} 任務，完成 ${done.length}，待驗收 ${pendingReview.length}，inbox ${inbox.length}`;
+  const pendingReview = done.filter((t) =>
+    isPendingReview(t as Parameters<typeof isPendingReview>[0]),
+  );
+  const pendingAi = pendingReview.filter(
+    (t) => t.review?.reviewer_type === 'agent' || t.review?.reviewer_type === 'orchestrator',
+  );
+  const pendingHuman = pendingReview.filter(
+    (t) => !t.review || t.review.reviewer_type === 'human',
+  );
+  const summary = `進度：共 ${tasks.length} 任務，完成 ${done.length}，待 AI 復查 ${pendingAi.length}，待人驗收 ${pendingHuman.length}，inbox ${inbox.length}`;
   appendRunMessage(runId, 'assistant', summary);
   if (tasks.length && done.length === tasks.length && pendingReview.length === 0) {
     updateAutoRun(runId, { status: 'completed', phase: 'completed' });
