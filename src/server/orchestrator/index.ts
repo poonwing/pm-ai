@@ -103,6 +103,31 @@ function parseJsonLoose<T>(text: string): T {
   }
 }
 
+/** Models often return checklist items as string[]; store as markdown string. */
+function coercePlanText(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === 'string' ? item : JSON.stringify(item)))
+      .filter((item) => item.trim().length > 0)
+      .join('\n');
+  }
+  return String(value);
+}
+
+function normalizePlan(plan: OrchestratorPlan): OrchestratorPlan {
+  return {
+    ...plan,
+    tasks: (plan.tasks ?? []).map((t) => ({
+      ...t,
+      title: coercePlanText(t.title).trim() || '未命名任務',
+      goal: coercePlanText(t.goal),
+      acceptance_criteria: coercePlanText(t.acceptance_criteria),
+    })),
+  };
+}
+
 /** Per-run tick mutex: serialize concurrent ticks; never run two planners at once. */
 const tickChains = new Map<string, Promise<unknown>>();
 
@@ -634,12 +659,13 @@ JSON schema:
 {
   "summary": string,
   "staff": [{"name","role","system_prompt","skills_tags":string[]}],
-  "tasks": [{"title","goal","acceptance_criteria","role","queue_order","reviewer_type"}],
+  "tasks": [{"title":string,"goal":string,"acceptance_criteria":string,"role":string,"queue_order":number,"reviewer_type":string}],
   "need_decision": boolean,
   "decision": {"title","summary","options":[{"id","label","description"}],"recommended_option_id"} | null,
   "need_meeting": boolean,
   "meeting_topic": string | null
-}`;
+}
+注意：acceptance_criteria 必須是單一字串（可用 \\n 分隔 checklist），不要回傳陣列。`;
 
   const userParts = [
     `目標：${goal}`,
@@ -653,7 +679,7 @@ JSON schema:
     ],
     { json: true, temperature: 0.3 },
   );
-  return parseJsonLoose<OrchestratorPlan>(content);
+  return normalizePlan(parseJsonLoose<OrchestratorPlan>(content));
 }
 
 export async function startOrchestratorRun(projectId: string, goal: string) {

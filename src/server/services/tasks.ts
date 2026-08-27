@@ -635,6 +635,24 @@ export function getTaskByUid(taskUid: string) {
   return getTask(row.projectId, row.id);
 }
 
+/** Coerce LLM / caller payloads that may send string[] instead of markdown string. */
+function coerceTextField(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === 'string' ? item : JSON.stringify(item)))
+      .filter((item) => item.trim().length > 0)
+      .join('\n');
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '';
+  }
+}
+
 export function createTask(
   projectId: string,
   input: z.infer<typeof CreateTaskSchema>,
@@ -644,7 +662,11 @@ export function createTask(
   if (project.bindingStatus !== 'ok') throw new ValidationError('workspace 不可用');
 
   const actorName = actor === 'agent' ? (input.agent_name ?? 'agent') : undefined;
-  const hasAcceptance = (input.acceptance_criteria ?? '').trim().length > 0;
+  const acceptanceCriteria = coerceTextField(input.acceptance_criteria);
+  const goal = coerceTextField(input.goal);
+  const constraints = coerceTextField(input.constraints);
+  const agentNotes = coerceTextField(input.agent_notes);
+  const hasAcceptance = acceptanceCriteria.trim().length > 0;
   const status = actor === 'agent' && hasAcceptance ? 'todo' : 'draft';
 
   const created = withWriteLock(project.workspacePath, () => {
@@ -664,10 +686,10 @@ export function createTask(
       created_by: actor,
       updated_by: actor,
       updated_by_name: actorName ?? null,
-      goal: input.goal ?? '',
-      acceptance_criteria: input.acceptance_criteria ?? '',
-      constraints: input.constraints ?? '',
-      agent_notes: input.agent_notes ?? '',
+      goal,
+      acceptance_criteria: acceptanceCriteria,
+      constraints,
+      agent_notes: agentNotes,
       result_note: '',
       artifacts: [],
       rejections: [],
@@ -691,9 +713,7 @@ export function createTask(
       },
     };
 
-    const body = input.goal
-      ? `## 目標\n\n${input.goal}\n`
-      : '';
+    const body = goal ? `## 目標\n\n${goal}\n` : '';
 
     const filePath = getTaskFilePath(project.workspacePath, taskId);
     writeTaskFile(filePath, frontmatter, body);
