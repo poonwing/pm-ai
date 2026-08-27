@@ -4,6 +4,7 @@ import { agentsApi, StaffAgent } from '../lib/api';
 import { Button, Input, Textarea, Label, Dialog, Badge } from '../components/ui';
 
 const ROLE_OPTIONS = [
+  'researcher',
   'analyst',
   'designer',
   'developer',
@@ -124,7 +125,7 @@ export function AgentsPage() {
         <div>
           <h1 className="text-xl font-semibold">AI 員工</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            專案預設會帶入固定角色（需求分析、設計、開發、測試、審查）。可編輯提示詞；打開「允許分派」後協調者才能派任務。
+            專案預設會帶入固定角色（研究員、需求分析、設計、開發、測試、審查）。可編輯提示詞；打開「允許分派」後協調者才能派任務。
           </p>
         </div>
         <Button onClick={openCreate}>新建員工</Button>

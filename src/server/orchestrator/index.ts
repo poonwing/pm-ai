@@ -25,6 +25,7 @@ import {
   createTask,
   getInbox,
   getProject,
+  getTask,
   listProjectTasks,
   updateProject,
   ValidationError,
@@ -32,9 +33,17 @@ import {
 import { chatCompletion, isModelConfigured } from './model.js';
 import { dispatchPendingAiReviews } from './ai-review.js';
 import { isPendingReview, type ReviewPolicy } from '../../shared/schemas.js';
+import {
+  RESEARCH_ACCEPTANCE,
+  RESEARCH_CONSTRAINTS,
+  collectWorkspaceBrief,
+  summarizeResearchForGoal,
+} from './research.js';
+import { getRunnerStatus, isRunnerConfigured } from '../runner/index.js';
 
 export type OrchestratorPhase =
   | 'intake'
+  | 'research'
   | 'clarify'
   | 'agree_review_policy'
   | 'plan'
@@ -117,6 +126,22 @@ function isWaitingPhase(phase: string): boolean {
 
 function isClarifyPhase(phase: string): boolean {
   return phase === 'intake' || phase === 'clarify';
+}
+
+function isResearchPhase(phase: string): boolean {
+  return phase === 'research';
+}
+
+function checkpointFlag(checkpoint: Record<string, unknown> | undefined | null, key: string): boolean {
+  return Boolean(checkpoint && checkpoint[key] === true);
+}
+
+function researchReportFromCheckpoint(
+  checkpoint: Record<string, unknown> | undefined | null,
+): string {
+  if (!checkpoint) return '';
+  const report = checkpoint.research_report;
+  return typeof report === 'string' ? report.trim() : '';
 }
 
 function isClarified(checkpoint: Record<string, unknown> | undefined | null): boolean {
@@ -207,15 +232,24 @@ function runResult(runId: string, extra?: Partial<TickResult>): TickResult {
 
 async function buildClarify(
   projectName: string,
+  projectDesc: string,
   goal: string,
   history: Array<{ role: string; content: string }>,
+  researchReport: string,
 ): Promise<ClarifyResult> {
   if (!isModelConfigured()) {
     const userTurns = history.filter((m) => m.role === 'user').length;
     if (userTurns <= 1) {
+      const known = [
+        projectDesc ? `專案描述：${projectDesc}` : '',
+        researchReport ? `研究摘要已備妥（見系統研究報告）。` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
       return {
         reply: [
-          `收到目標「${goal}」。開工前想先對齊需求（模糊也可以，我們慢慢補）：`,
+          `收到目標「${goal}」。${known ? `\n${known}\n` : ''}`,
+          '開工前想先對齊需求（已知專案現況的問題請勿重複問）：',
           '1. 成功長什麼樣？有沒有必須達成的驗收標準？',
           '2. 範圍邊界：明確不做什麼？',
           '3. 技術/期限/依賴上有沒有硬約束？',
@@ -239,11 +273,19 @@ async function buildClarify(
   }
 
   const system = `你是 PM-AI 專案協調者，正在「需求澄清」階段，還沒有開始規劃或分派任務。
-專案：${projectName}
+專案名稱：${projectName}
+專案描述：${projectDesc || '（無）'}
 初始目標：${goal}
+
+${
+  researchReport
+    ? `研究員已提供 workspace 研究報告（請視為已知事實，不要再問「專案是什麼類型」這類已能從報告推知的問題）：\n${researchReport.slice(0, 6000)}`
+    : '（尚無研究報告）'
+}
 
 規則：
 - 目標可能很模糊；用簡短中文多輪追問，一次最多 2～3 個問題。
+- 只問報告與描述仍無法確定的缺口（例如這次要優化的具體痛點、不做什麼）。
 - 不要規劃員工、任務或技術方案細節；先對齊要做什麼、不做什麼、如何算完成。
 - 若資訊已大致足夠，在 reply 末尾明確告知使用者可回覆「開始工作」來開工。
 - 除非使用者已表達要立刻開工，否則 ready_to_execute 必須為 false。
@@ -291,7 +333,13 @@ async function runIntakeClarify(runId: string): Promise<TickResult> {
   const run = getAutoRun(runId);
   const project = getProject(run.project_id);
   const history = getAutoRunMessages(runId);
-  const result = await buildClarify(project.name, run.goal, history);
+  const result = await buildClarify(
+    project.name,
+    project.description ?? '',
+    run.goal,
+    history,
+    researchReportFromCheckpoint(run.checkpoint),
+  );
 
   let reply = result.reply;
   if (result.ready_to_execute && !/開始工作|开始工作/.test(reply)) {
@@ -329,6 +377,196 @@ function markClarifiedAndContinue(runId: string, note?: string) {
   });
 }
 
+async function finishResearch(
+  runId: string,
+  report: string,
+  source: 'runner' | 'local' | 'fallback',
+): Promise<void> {
+  const run = getAutoRun(runId);
+  const trimmed = report.trim().slice(0, 8000);
+  updateAutoRun(runId, {
+    status: 'running',
+    phase: checkpointFlag(run.checkpoint, 'skip_clarify_after_research')
+      ? 'agree_review_policy'
+      : 'clarify',
+    checkpoint: {
+      ...run.checkpoint,
+      research_done: true,
+      research_source: source,
+      research_report: trimmed,
+      research_finished_at: new Date().toISOString(),
+      ...(checkpointFlag(run.checkpoint, 'skip_clarify_after_research')
+        ? { clarified: true, clarified_at: new Date().toISOString() }
+        : {}),
+    },
+  });
+  appendRunMessage(
+    runId,
+    'assistant',
+    source === 'runner'
+      ? `研究員已完成 workspace 分析，接下來會基於研究結果澄清／規劃。\n\n—— 研究摘要 ——\n${trimmed.slice(0, 2500)}${trimmed.length > 2500 ? '\n…' : ''}`
+      : `已完成 workspace 快速研究（${source}），接下來會基於結果澄清／規劃。\n\n—— 研究摘要 ——\n${trimmed.slice(0, 2500)}${trimmed.length > 2500 ? '\n…' : ''}`,
+  );
+}
+
+/** Ensure research report exists before clarify/plan. Returns a result when still waiting. */
+async function ensureResearchBeforeClarify(runId: string): Promise<TickResult | null> {
+  const run = getAutoRun(runId);
+  if (checkpointFlag(run.checkpoint, 'research_done')) return null;
+
+  const project = getProject(run.project_id);
+  ensureDefaultStaffAgents(run.project_id);
+
+  const researchTaskId =
+    typeof run.checkpoint.research_task_id === 'string' ? run.checkpoint.research_task_id : null;
+
+  if (researchTaskId) {
+    try {
+      const task = getTask(run.project_id, researchTaskId);
+      if (task.status === 'done') {
+        const note = String(task.result_note ?? '').trim();
+        const report =
+          note ||
+          (await summarizeResearchForGoal(
+            collectWorkspaceBrief(project.workspacePath),
+            run.goal,
+            project.name,
+            project.description ?? '',
+          ));
+        await finishResearch(runId, report, note ? 'runner' : 'fallback');
+        return null;
+      }
+
+      const jobs = getRunnerStatus(run.project_id).jobs.filter((j) => j.taskId === researchTaskId);
+      const terminal = jobs.find((j) => j.status === 'failed' || j.status === 'cancelled');
+      if (terminal) {
+        const brief = collectWorkspaceBrief(project.workspacePath);
+        const report = await summarizeResearchForGoal(
+          brief,
+          run.goal,
+          project.name,
+          project.description ?? '',
+        );
+        await finishResearch(
+          runId,
+          `${report}\n\n（Runner 研究任務 ${terminal.status}：${terminal.error ?? ''}）`,
+          'fallback',
+        );
+        return null;
+      }
+
+      updateAutoRun(runId, { phase: 'research', status: 'running' });
+      return runResult(runId);
+    } catch {
+      /* task missing → recreate below */
+    }
+  }
+
+  // No runner: local brief + optional LLM summary (sync path)
+  if (!isRunnerConfigured()) {
+    appendRunMessage(
+      runId,
+      'assistant',
+      'Runner 未配置，改以本機快照做快速研究（只讀）…',
+    );
+    const brief = collectWorkspaceBrief(project.workspacePath);
+    const report = await summarizeResearchForGoal(
+      brief,
+      run.goal,
+      project.name,
+      project.description ?? '',
+    );
+    await finishResearch(runId, report, 'local');
+    return null;
+  }
+
+  const researchers = listStaffAgents(run.project_id, { assignableOnly: true }).filter(
+    (a) => a.role === 'researcher',
+  );
+  const researcher = researchers[0];
+  if (!researcher) {
+    const brief = collectWorkspaceBrief(project.workspacePath);
+    const report = await summarizeResearchForGoal(
+      brief,
+      run.goal,
+      project.name,
+      project.description ?? '',
+    );
+    await finishResearch(runId, report, 'local');
+    return null;
+  }
+
+  const task = createTask(
+    run.project_id,
+    {
+      title: `研究：${run.goal.slice(0, 48)}`,
+      goal: [
+        `針對用戶需求做 workspace 只讀分析。`,
+        `需求：${run.goal}`,
+        project.description ? `專案描述：${project.description}` : '',
+        `工作目錄：${project.workspacePath}`,
+        `請產出結構化研究報告（見員工人設），供協調者澄清與規劃。`,
+      ]
+        .filter(Boolean)
+        .join('\n'),
+      acceptance_criteria: RESEARCH_ACCEPTANCE,
+      constraints: RESEARCH_CONSTRAINTS,
+      agent_name: 'orchestrator',
+      use_isolation: false,
+      assignee_agent_id: researcher.id,
+      assignee_name: researcher.name,
+      queue_order: 0,
+      review: {
+        required: false,
+        reviewer_type: 'none',
+        reviewer_agent_id: null,
+        status: 'none',
+        note: '',
+      },
+    },
+    'agent',
+  );
+
+  const { enqueueRunnerJob } = await import('../runner/index.js');
+  const job = enqueueRunnerJob({
+    projectId: run.project_id,
+    taskId: task.id,
+    autoRunId: runId,
+  });
+
+  if (job.status === 'failed') {
+    const brief = collectWorkspaceBrief(project.workspacePath);
+    const report = await summarizeResearchForGoal(
+      brief,
+      run.goal,
+      project.name,
+      project.description ?? '',
+    );
+    await finishResearch(
+      runId,
+      `${report}\n\n（Runner 未能啟動研究任務：${job.error ?? 'unknown'}）`,
+      'fallback',
+    );
+    return null;
+  }
+
+  updateAutoRun(runId, {
+    phase: 'research',
+    status: 'running',
+    checkpoint: {
+      ...run.checkpoint,
+      research_task_id: task.id,
+      research_started_at: new Date().toISOString(),
+    },
+  });
+  appendRunMessage(
+    runId,
+    'assistant',
+    `已指派研究員「${researcher.name}」分析 workspace（任務 ${task.id}，只讀）。完成後我會帶著研究結果繼續澄清。`,
+  );
+  return runResult(runId, { tasks: [task.id] });
+}
+
 async function buildPlan(
   projectName: string,
   projectDesc: string,
@@ -336,6 +574,7 @@ async function buildPlan(
   history: Array<{ role: string; content: string }>,
   policy: ReviewPolicy,
   existingStaff: Array<{ name: string; role: string; system_prompt: string }>,
+  researchReport: string,
 ): Promise<OrchestratorPlan> {
   if (!isModelConfigured()) {
     return {
@@ -375,13 +614,20 @@ async function buildPlan(
 描述：${projectDesc || '（無）'}
 預設審查：${policy.default_reviewer_type}
 
-專案已有固定可分派員工（優先使用，不要重複建立同 role）：
+${
+  researchReport
+    ? `研究員 workspace 報告（規劃時請尊重現況，避免重寫整個專案）：\n${researchReport.slice(0, 5000)}`
+    : '（無研究報告）'
+}
+
+專案已有固定可分派員工（優先使用，不要重複建立同 role；researcher 通常不必再派實作任務）：
 ${staffRoster || '（尚無）'}
 
 規則：
 - tasks.role 必須對應上列既有 role，或你在 staff 裡擬新增的非常規 role
 - staff 陣列僅用於：(1) 依本目標微調既有角色的 system_prompt；(2) 缺職能時新增非常規角色
 - 不需要調整提示詞時 staff 可為 []
+- 不要再建立「研究／探勘」任務（研究已完成）
 - 常用既有 role：analyst / designer / developer / tester / reviewer
 
 JSON schema:
@@ -415,9 +661,16 @@ export async function startOrchestratorRun(projectId: string, goal: string) {
   updateProject(projectId, { run_mode: 'auto' });
   const run = createAutoRun(projectId, goal);
   if (isStartWorkRequest(goal)) {
-    markClarifiedAndContinue(
+    updateAutoRun(run.id, {
+      checkpoint: {
+        ...run.checkpoint,
+        skip_clarify_after_research: true,
+      },
+    });
+    appendRunMessage(
       run.id,
-      '偵測到你要求立刻開工，將跳過需求澄清，進入審查協定與規劃。',
+      'assistant',
+      '偵測到你要求立刻開工：先做 workspace 研究，完成後將跳過需求澄清，進入審查協定與規劃。',
     );
     return tickOrchestrator(run.id, { skipClarify: true });
   }
@@ -453,6 +706,35 @@ export async function messageOrchestrator(runId: string, message: string) {
   }
 
   latest = getAutoRun(runId);
+
+  if (
+    isResearchPhase(latest.phase) ||
+    (!checkpointFlag(latest.checkpoint, 'research_done') &&
+      typeof latest.checkpoint.research_task_id === 'string')
+  ) {
+    if (isStartWorkRequest(message)) {
+      updateAutoRun(runId, {
+        checkpoint: {
+          ...latest.checkpoint,
+          skip_clarify_after_research: true,
+        },
+      });
+      appendRunMessage(
+        runId,
+        'assistant',
+        '已記下。研究員完成後將跳過澄清，直接進入審查協定與規劃。',
+      );
+    } else {
+      appendRunMessage(
+        runId,
+        'assistant',
+        '研究員仍在分析 workspace，已記下你的補充；研究完成後會一併納入澄清／規劃。',
+      );
+    }
+    return tickOrchestrator(runId, {
+      skipClarify: checkpointFlag(getAutoRun(runId).checkpoint, 'skip_clarify_after_research'),
+    });
+  }
 
   if (!isClarified(latest.checkpoint) && isClarifyPhase(latest.phase)) {
     if (isStartWorkRequest(message)) {
@@ -537,7 +819,6 @@ async function tickOrchestratorUnlocked(
 
   const project = getProject(run.project_id);
   ensureDefaultStaffAgents(run.project_id);
-  const policy = getReviewPolicy(run.project_id);
   const history = getAutoRunMessages(runId);
 
   // Interrupt if open decisions
@@ -561,22 +842,40 @@ async function tickOrchestratorUnlocked(
     return runResult(runId);
   }
 
+  // Workspace research before clarify / policy / plan (keep report on forceReplan)
+  if (!checkpointFlag(run.checkpoint, 'research_done')) {
+    const waiting = await ensureResearchBeforeClarify(runId);
+    if (waiting) return waiting;
+  }
+
+  let latestRun = getAutoRun(runId);
+  const skipClarify =
+    opts.skipClarify ||
+    checkpointFlag(latestRun.checkpoint, 'skip_clarify_after_research') ||
+    isClarified(latestRun.checkpoint);
+
   // Requirement clarification before any policy/plan work
-  if (
-    !isClarified(run.checkpoint) &&
-    !opts.skipClarify &&
-    !opts.forceReplan &&
-    isClarifyPhase(run.phase)
-  ) {
+  if (!skipClarify && !opts.forceReplan && isClarifyPhase(latestRun.phase)) {
     return runIntakeClarify(runId);
   }
 
-  if (!policy.confirmed) {
+  // After research with skip flag, phase may still be clarify — advance
+  if (
+    skipClarify &&
+    !isClarified(latestRun.checkpoint) &&
+    (isClarifyPhase(latestRun.phase) || isResearchPhase(latestRun.phase))
+  ) {
+    markClarifiedAndContinue(runId);
+    latestRun = getAutoRun(runId);
+  }
+
+  const policyNow = getReviewPolicy(latestRun.project_id);
+  if (!policyNow.confirmed) {
     const draft = upsertReviewPolicy(
-      run.project_id,
+      latestRun.project_id,
       {
         default_reviewer_type: 'human',
-        human_verify_notes: `針對目標「${run.goal}」：核心交付需人類驗收；細節可由 AI reviewer 先查。`,
+        human_verify_notes: `針對目標「${latestRun.goal}」：核心交付需人類驗收；細節可由 AI reviewer 先查。`,
         confirmed: false,
       },
       false,
@@ -587,7 +886,7 @@ async function tickOrchestratorUnlocked(
       `請先確認審查協定（Review Policy）：預設審查者=${draft.default_reviewer_type}。確認後我會繼續規劃與分派。`,
     );
     createDecision({
-      projectId: run.project_id,
+      projectId: latestRun.project_id,
       runId,
       title: '確認 Review Policy',
       summary: draft.human_verify_notes,
@@ -609,35 +908,36 @@ async function tickOrchestratorUnlocked(
     updateAutoRun(runId, {
       status: 'awaiting_human',
       phase: 'agree_review_policy',
-      checkpoint: { ...run.checkpoint, clarified: true, policy_draft: draft },
+      checkpoint: { ...latestRun.checkpoint, clarified: true, policy_draft: draft },
     });
     return {
       run: getAutoRun(runId),
       messages: getAutoRunMessages(runId),
-      decisions: listDecisions(run.project_id, 'open'),
+      decisions: listDecisions(latestRun.project_id, 'open'),
     };
   }
 
   // If phase is agree_review_policy and somehow no open decision, mark confirmed via last choice handled in resolve hook
-  if (run.phase === 'agree_review_policy') {
-    upsertReviewPolicy(run.project_id, { confirmed: true }, true);
+  if (latestRun.phase === 'agree_review_policy') {
+    upsertReviewPolicy(latestRun.project_id, { confirmed: true }, true);
   }
 
   updateAutoRun(runId, { phase: 'plan', status: 'running' });
   appendRunMessage(runId, 'assistant', '正在規劃任務分派…');
 
-  const roster = listStaffAgents(run.project_id, { assignableOnly: true });
+  const roster = listStaffAgents(latestRun.project_id, { assignableOnly: true });
   const plan = await buildPlan(
     project.name,
     project.description ?? '',
-    run.goal,
+    latestRun.goal,
     history,
-    getReviewPolicy(run.project_id),
+    getReviewPolicy(latestRun.project_id),
     roster.map((s) => ({
       name: s.name,
       role: s.role,
       system_prompt: s.system_prompt,
     })),
+    researchReportFromCheckpoint(latestRun.checkpoint),
   );
 
   appendRunMessage(runId, 'assistant', plan.summary || '計劃已生成');

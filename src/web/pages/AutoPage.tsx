@@ -498,9 +498,11 @@ export function AutoPage() {
                 placeholder={
                   decisions.some((d) => d.status === 'open')
                     ? '決策：回 1 / 選項原文 /「自訂：…」；或僅留言'
-                    : activeRun.phase === 'clarify' || activeRun.phase === 'intake'
-                      ? '補充需求；對齊後回「開始工作」才會開工'
-                      : '補充指示；執行中不會重規劃（回「重新規劃」才會）'
+                    : activeRun.phase === 'research'
+                      ? '研究員分析中；可補充需求，或回「開始工作」讓研究後直接開工'
+                      : activeRun.phase === 'clarify' || activeRun.phase === 'intake'
+                        ? '補充需求；對齊後回「開始工作」才會開工'
+                        : '補充指示；執行中不會重規劃（回「重新規劃」才會）'
                 }
                 onKeyDown={(e) => e.key === 'Enter' && send()}
               />

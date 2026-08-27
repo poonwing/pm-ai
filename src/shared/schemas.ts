@@ -29,6 +29,7 @@ export type RunMode = (typeof RUN_MODES)[number];
 
 export const AGENT_ROLES = [
   'orchestrator',
+  'researcher',
   'analyst',
   'designer',
   'developer',

@@ -17,7 +17,8 @@ export type OrchestratorStateType = typeof OrchestratorState.State;
 /** Declarative phase machine (for tooling / future interrupt wiring). */
 export function buildOrchestratorGraph() {
   const g = new StateGraph(OrchestratorState)
-    .addNode('intake', async (s) => ({ ...s, phase: 'clarify' }))
+    .addNode('intake', async (s) => ({ ...s, phase: 'research' }))
+    .addNode('research', async (s) => ({ ...s, phase: 'clarify' }))
     .addNode('clarify', async (s) => ({ ...s, phase: 'agree_review_policy' }))
     .addNode('agree_review_policy', async (s) => ({ ...s, phase: 'plan' }))
     .addNode('plan', async (s) => ({ ...s, phase: 'ensure_staff' }))
@@ -28,7 +29,8 @@ export function buildOrchestratorGraph() {
       s.stopRequested ? { ...s, phase: 'stopped' } : { ...s, phase: 'completed' },
     )
     .addEdge(START, 'intake')
-    .addEdge('intake', 'clarify')
+    .addEdge('intake', 'research')
+    .addEdge('research', 'clarify')
     .addEdge('clarify', 'agree_review_policy')
     .addEdge('agree_review_policy', 'plan')
     .addEdge('plan', 'ensure_staff')
