@@ -16,7 +16,9 @@ export function DesignsPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const previewShellRef = useRef<HTMLDivElement>(null);
 
   const loadList = useCallback(async () => {
     if (!projectId) return;
@@ -63,6 +65,35 @@ export function DesignsPage() {
     setPreviewUrl(url);
     return () => URL.revokeObjectURL(url);
   }, [design?.html]);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      setIsFullscreen(document.fullscreenElement === previewShellRef.current);
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
+
+  useEffect(() => {
+    if (view !== 'preview' && document.fullscreenElement === previewShellRef.current) {
+      void document.exitFullscreen().catch(() => undefined);
+    }
+  }, [view]);
+
+  const toggleFullscreen = async () => {
+    const shell = previewShellRef.current;
+    if (!shell || !previewUrl) return;
+    setError('');
+    try {
+      if (document.fullscreenElement === shell) {
+        await document.exitFullscreen();
+      } else {
+        await shell.requestFullscreen();
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '無法切換全螢幕');
+    }
+  };
 
   const create = async () => {
     if (!projectId || !newTitle.trim()) return;
@@ -237,6 +268,15 @@ export function DesignsPage() {
               </Button>
               <Button
                 size="sm"
+                variant="ghost"
+                onClick={() => void toggleFullscreen()}
+                disabled={view !== 'preview' || !previewUrl}
+                title={view !== 'preview' ? '請先切換到預覽' : undefined}
+              >
+                {isFullscreen ? '退出全螢幕' : '全螢幕'}
+              </Button>
+              <Button
+                size="sm"
                 variant={view === 'source' ? undefined : 'ghost'}
                 onClick={() => setView('source')}
               >
@@ -250,12 +290,14 @@ export function DesignsPage() {
             </div>
           ) : view === 'preview' ? (
             previewUrl ? (
-              <iframe
-                title={design.title}
-                src={previewUrl}
-                sandbox="allow-scripts"
-                className="flex-1 w-full bg-white border-0"
-              />
+              <div ref={previewShellRef} className="design-preview-shell flex-1 flex flex-col min-h-0 bg-white">
+                <iframe
+                  title={design.title}
+                  src={previewUrl}
+                  sandbox="allow-scripts"
+                  className="flex-1 w-full border-0"
+                />
+              </div>
             ) : (
               <div className="p-3 text-sm text-muted-foreground">無法預覽</div>
             )
