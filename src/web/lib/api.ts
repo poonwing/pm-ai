@@ -720,14 +720,12 @@ export const requirementsApi = {
     }),
   messages: (projectId: string) =>
     api<StudioMessage[]>(`/projects/${projectId}/requirements/messages`),
-  analyze: (
-    projectId: string,
-    data: { source: 'prompt' | 'codebase'; message: string },
-  ) =>
+  analyze: (projectId: string, data: { message: string }) =>
     api<{
       markdown: string;
       updatedAt: string | null;
       messages: StudioMessage[];
+      mode?: 'codebase' | 'prompt' | 'assist';
     }>(`/projects/${projectId}/requirements/analyze`, {
       method: 'POST',
       body: JSON.stringify(data),

@@ -541,9 +541,6 @@ export type WorkspaceFileContentResponse = z.infer<typeof WorkspaceFileContentRe
 export const StudioEngineSchema = z.enum(['internal', 'external']);
 export type StudioEngine = z.infer<typeof StudioEngineSchema>;
 
-export const RequirementsSourceSchema = z.enum(['prompt', 'codebase']);
-export type RequirementsSource = z.infer<typeof RequirementsSourceSchema>;
-
 export const StudioMessageSchema = z.object({
   id: z.string(),
   role: z.enum(['user', 'assistant', 'system']),
@@ -559,8 +556,7 @@ export const UpdateRequirementsSchema = z.object({
 });
 
 export const AnalyzeRequirementsSchema = z.object({
-  source: RequirementsSourceSchema.default('prompt'),
-  message: z.string().default(''),
+  message: z.string().min(1),
 });
 
 export const CreateDesignSchema = z.object({

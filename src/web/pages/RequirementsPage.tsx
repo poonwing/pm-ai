@@ -12,7 +12,6 @@ export function RequirementsPage() {
   const [savedMarkdown, setSavedMarkdown] = useState('');
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [messages, setMessages] = useState<StudioMessage[]>([]);
-  const [source, setSource] = useState<'prompt' | 'codebase'>('prompt');
   const [chat, setChat] = useState('');
   const [mode, setMode] = useState<'preview' | 'edit'>('preview');
   const [busy, setBusy] = useState(false);
@@ -57,15 +56,12 @@ export function RequirementsPage() {
   };
 
   const send = async () => {
-    if (!projectId) return;
-    const message = chat.trim() || (source === 'codebase' ? '請根據現有代碼整理完整需求文档' : '');
-    if (!message) return;
+    if (!projectId || !chat.trim()) return;
     setBusy(true);
     setError('');
     try {
       const result = await requirementsApi.analyze(projectId, {
-        source,
-        message,
+        message: chat.trim(),
       });
       setChat('');
       setMessages(result.messages);
@@ -95,7 +91,7 @@ export function RequirementsPage() {
         <div>
           <h1 className="text-xl font-semibold">需求分析</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            與 AI 對話整理需求，或根據現有代碼歸納。文档為一份 Markdown，可下載；本機 Agent 也可直接讀寫該檔。
+            直接描述需求即可；AI 會自動判斷是新項目規劃，還是對照現有代碼整理。文档為一份 Markdown，可下載。
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -123,7 +119,7 @@ export function RequirementsPage() {
           <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2 bg-zinc-50">
             {messages.length === 0 && (
               <p className="text-sm text-muted-foreground">
-                描述你要做什麼，或切換「根據現有代碼」從 workspace 整理需求。
+                例如：「做一個待辦 App」或「根據現有代碼整理需求文档」。若需嚴格只讀代碼，可寫「請根據現有代碼整理，不要假設」。
               </p>
             )}
             {messages.map((m) => (
@@ -135,31 +131,11 @@ export function RequirementsPage() {
             <div ref={chatEndRef} />
           </div>
           <div className="p-3 border-t border-border flex flex-col gap-2">
-            <div className="flex gap-1">
-              <Button
-                size="sm"
-                variant={source === 'prompt' ? undefined : 'ghost'}
-                onClick={() => setSource('prompt')}
-              >
-                用戶描述
-              </Button>
-              <Button
-                size="sm"
-                variant={source === 'codebase' ? undefined : 'ghost'}
-                onClick={() => setSource('codebase')}
-              >
-                根據現有代碼
-              </Button>
-            </div>
             <Textarea
               rows={3}
               value={chat}
               onChange={(e) => setChat(e.target.value)}
-              placeholder={
-                source === 'codebase'
-                  ? '可補充焦點（例如「只整理登入相關」）；可直接發送'
-                  : '描述目標用戶、要做與不做的範圍…'
-              }
+              placeholder="描述目標、功能、不做什麼；或請 AI 整理現有專案…"
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                   e.preventDefault();
@@ -169,7 +145,7 @@ export function RequirementsPage() {
             />
             <div className="flex justify-between items-center">
               <span className="text-xs text-muted-foreground">Ctrl/⌘ + Enter 發送</span>
-              <Button onClick={send} disabled={busy || (!chat.trim() && source !== 'codebase')}>
+              <Button onClick={send} disabled={busy || !chat.trim()}>
                 {busy ? '處理中…' : '發送'}
               </Button>
             </div>
