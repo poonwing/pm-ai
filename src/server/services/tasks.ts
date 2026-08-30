@@ -2183,6 +2183,36 @@ export async function deleteProject(projectId: string, options: { force?: boolea
     if (pmAiWarning) warnings.push(pmAiWarning);
 
     const db = getDb();
+
+    const meetingIds = db
+      .select({ id: schema.meetings.id })
+      .from(schema.meetings)
+      .where(eq(schema.meetings.projectId, projectId))
+      .all()
+      .map((row) => row.id);
+    if (meetingIds.length > 0) {
+      db.delete(schema.meetingMessages)
+        .where(inArray(schema.meetingMessages.meetingId, meetingIds))
+        .run();
+    }
+
+    const runIds = db
+      .select({ id: schema.autoRuns.id })
+      .from(schema.autoRuns)
+      .where(eq(schema.autoRuns.projectId, projectId))
+      .all()
+      .map((row) => row.id);
+    if (runIds.length > 0) {
+      db.delete(schema.autoRunMessages)
+        .where(inArray(schema.autoRunMessages.runId, runIds))
+        .run();
+    }
+
+    db.delete(schema.meetings).where(eq(schema.meetings.projectId, projectId)).run();
+    db.delete(schema.decisions).where(eq(schema.decisions.projectId, projectId)).run();
+    db.delete(schema.autoRuns).where(eq(schema.autoRuns.projectId, projectId)).run();
+    db.delete(schema.staffAgents).where(eq(schema.staffAgents.projectId, projectId)).run();
+    db.delete(schema.reviewPolicies).where(eq(schema.reviewPolicies.projectId, projectId)).run();
     db.delete(schema.previewServers).where(eq(schema.previewServers.projectId, projectId)).run();
 
     const taskUids = tasksToClean.map((task) => task.uid);
