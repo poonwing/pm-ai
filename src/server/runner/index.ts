@@ -2,6 +2,7 @@ export {
   enqueueRunnerJob,
   cancelForAutoRun,
   getRunnerStatus,
+  getRunnerJob,
   type RunnerJob,
   type RunnerJobStatus,
 } from './queue.js';
@@ -13,6 +14,8 @@ export {
   getOpenCodeRunnerConfig,
   getRunnerProvider,
   type RunnerProvider,
+  type RunnerJobKind,
+  type StudioKind,
 } from './types.js';
 export {
   isOpenCodeCliInstalled,

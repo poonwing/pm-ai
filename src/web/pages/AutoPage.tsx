@@ -29,6 +29,7 @@ export function AutoPage() {
       error?: string | null;
       resultSummary?: string | null;
       updatedAt: string;
+      kind?: string;
     }>
   >([]);
   const [runnerConfigured, setRunnerConfigured] = useState(false);
@@ -388,11 +389,14 @@ export function AutoPage() {
               '未检测到 OpenCode CLI。请先安装后再执行任务：curl -fsSL https://opencode.ai/install | bash  或  npm i -g opencode-ai，然后重开终端并重启 PM-AI。'}
           </p>
         )}
-        {runnerJobs.length === 0 ? (
+        {runnerJobs.filter((j) => j.kind !== 'studio').length === 0 ? (
           <p className="text-xs text-muted-foreground">尚無執行任務。分派後會自動排隊。</p>
         ) : (
           <ul className="flex flex-col gap-2 text-sm">
-            {runnerJobs.slice(0, 12).map((j) => (
+            {runnerJobs
+              .filter((j) => j.kind !== 'studio')
+              .slice(0, 12)
+              .map((j) => (
               <li key={j.id} className="flex flex-col gap-0.5 border-b border-border/60 pb-2">
                 <div className="flex items-center gap-2 flex-wrap">
                   <code className="text-xs">{j.taskId}</code>

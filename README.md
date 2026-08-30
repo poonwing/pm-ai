@@ -55,6 +55,8 @@ Agent 不能：發布草稿、取消、驗收。
 | 專案設定 | `<workspace>/.pm-ai/project.yml` |
 | 活動日誌 | `<workspace>/.pm-ai/activity/*.jsonl` |
 | 任務評論 | `<workspace>/.pm-ai/comments/{任務ID}.jsonl` |
+| 需求文档 | `<workspace>/.pm-ai/requirements.md` |
+| UI 設計稿 | `<workspace>/.pm-ai/designs/*.html` |
 | 索引/租約 | `%APPDATA%/pm-ai/pm-ai.sqlite` |
 | API 設定 | `%APPDATA%/pm-ai/config.json` |
 

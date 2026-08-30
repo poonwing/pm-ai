@@ -18,6 +18,7 @@ import {
   getProjectConfigPath,
   getLocksDir,
   getCommentsDir,
+  getDesignsDir,
   PM_AI_README,
   PM_AI_GITIGNORE,
 } from '../paths.js';
@@ -37,6 +38,7 @@ export function ensurePmAiStructure(workspacePath: string): void {
   fs.mkdirSync(getActivityDir(workspacePath), { recursive: true });
   fs.mkdirSync(getCommentsDir(workspacePath), { recursive: true });
   fs.mkdirSync(getLocksDir(workspacePath), { recursive: true });
+  fs.mkdirSync(getDesignsDir(workspacePath), { recursive: true });
   fs.mkdirSync(path.join(pmAiDir, 'cache'), { recursive: true });
 
   const readmePath = path.join(pmAiDir, 'README.md');

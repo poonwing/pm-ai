@@ -32,6 +32,11 @@ import {
   AutoRunMessageSchema,
   ResolveDecisionSchema,
   UpdateReviewPolicySchema,
+  UpdateRequirementsSchema,
+  AnalyzeRequirementsSchema,
+  CreateDesignSchema,
+  UpdateDesignSchema,
+  GenerateDesignSchema,
   TASK_STATUSES,
   STATUS_LABELS,
   PORT,
@@ -57,6 +62,8 @@ import * as autoService from './services/auto.js';
 import * as orchestrator from './orchestrator/index.js';
 import { isModelConfigured } from './orchestrator/model.js';
 import { getRunnerStatus } from './runner/index.js';
+import * as requirementsService from './services/requirements.js';
+import * as designsService from './services/designs.js';
 
 type Variables = {
   actor: 'human' | 'agent' | 'orchestrator';
@@ -69,7 +76,7 @@ app.use(
   cors({
     origin: ['http://127.0.0.1:7432', 'http://localhost:7432', 'http://127.0.0.1:5173', 'http://localhost:5173'],
     allowHeaders: ['Authorization', 'Content-Type', 'X-PM-AI-Actor'],
-    allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   }),
 );
 
@@ -963,6 +970,155 @@ app.get('/api/v1/projects/:id/review-policy', authMiddleware('any'), (c) => {
 app.get('/api/v1/projects/:id/runner/status', authMiddleware('any'), (c) => {
   try {
     return c.json(getRunnerStatus(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.get('/api/v1/projects/:id/requirements', authMiddleware('human'), (c) => {
+  try {
+    return c.json(requirementsService.getRequirements(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.put(
+  '/api/v1/projects/:id/requirements',
+  authMiddleware('human'),
+  zValidator('json', UpdateRequirementsSchema),
+  (c) => {
+    try {
+      return c.json(requirementsService.saveRequirements(requireParam(c, 'id'), c.req.valid('json').markdown));
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  },
+);
+
+app.get('/api/v1/projects/:id/requirements/download', authMiddleware('human'), (c) => {
+  try {
+    const { markdown, filename } = requirementsService.getRequirementsDownload(requireParam(c, 'id'));
+    return c.text(markdown, 200, {
+      'Content-Type': 'text/markdown; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    });
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.get('/api/v1/projects/:id/requirements/messages', authMiddleware('human'), (c) => {
+  try {
+    return c.json(requirementsService.getRequirementsMessages(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post(
+  '/api/v1/projects/:id/requirements/analyze',
+  authMiddleware('human'),
+  zValidator('json', AnalyzeRequirementsSchema),
+  async (c) => {
+    try {
+      return c.json(await requirementsService.analyzeRequirements(requireParam(c, 'id'), c.req.valid('json')));
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  },
+);
+
+app.get('/api/v1/projects/:id/designs', authMiddleware('human'), (c) => {
+  try {
+    return c.json(designsService.listDesigns(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post(
+  '/api/v1/projects/:id/designs',
+  authMiddleware('human'),
+  zValidator('json', CreateDesignSchema),
+  (c) => {
+    try {
+      return c.json(designsService.createDesign(requireParam(c, 'id'), c.req.valid('json').title));
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  },
+);
+
+app.get('/api/v1/projects/:id/designs/messages', authMiddleware('human'), (c) => {
+  try {
+    return c.json(designsService.getDesignMessages(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post(
+  '/api/v1/projects/:id/designs/generate',
+  authMiddleware('human'),
+  zValidator('json', GenerateDesignSchema),
+  async (c) => {
+    try {
+      const body = c.req.valid('json');
+      return c.json(
+        await designsService.generateDesign(requireParam(c, 'id'), {
+          message: body.message,
+          designId: body.design_id,
+          title: body.title,
+        }),
+      );
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  },
+);
+
+app.get('/api/v1/projects/:id/designs/:designId/download', authMiddleware('human'), (c) => {
+  try {
+    const { html, filename } = designsService.getDesignDownload(
+      requireParam(c, 'id'),
+      requireParam(c, 'designId'),
+    );
+    return c.text(html, 200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    });
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.get('/api/v1/projects/:id/designs/:designId', authMiddleware('human'), (c) => {
+  try {
+    return c.json(designsService.getDesign(requireParam(c, 'id'), requireParam(c, 'designId')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.put(
+  '/api/v1/projects/:id/designs/:designId',
+  authMiddleware('human'),
+  zValidator('json', UpdateDesignSchema),
+  (c) => {
+    try {
+      return c.json(
+        designsService.updateDesign(requireParam(c, 'id'), requireParam(c, 'designId'), c.req.valid('json')),
+      );
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  },
+);
+
+app.delete('/api/v1/projects/:id/designs/:designId', authMiddleware('human'), async (c) => {
+  try {
+    return c.json(designsService.deleteDesign(requireParam(c, 'id'), requireParam(c, 'designId')));
   } catch (err) {
     return errorResponse(c, err);
   }

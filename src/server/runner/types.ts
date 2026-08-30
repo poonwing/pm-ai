@@ -8,11 +8,18 @@ export type RunnerJobStatus =
   | 'failed'
   | 'cancelled';
 
+export type RunnerJobKind = 'task' | 'studio';
+export type StudioKind = 'requirements' | 'design';
+
 export interface RunnerJob {
   id: string;
   projectId: string;
   taskId: string;
   autoRunId?: string | null;
+  kind: RunnerJobKind;
+  studioKind?: StudioKind;
+  prompt?: string;
+  cwd?: string;
   status: RunnerJobStatus;
   agentName: string;
   provider?: RunnerProvider;

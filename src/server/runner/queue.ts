@@ -21,6 +21,8 @@ import {
   type RunnerJob,
   type RunnerJobStatus,
   type RunnerProvider,
+  type RunnerJobKind,
+  type StudioKind,
 } from './types.js';
 
 const jobs = new Map<string, RunnerJob>();
@@ -77,25 +79,50 @@ export function getRunnerStatus(projectId: string) {
 
 export function enqueueRunnerJob(input: {
   projectId: string;
-  taskId: string;
+  taskId?: string;
   autoRunId?: string | null;
+  kind?: RunnerJobKind;
+  studioKind?: StudioKind;
+  prompt?: string;
+  cwd?: string;
 }): RunnerJob {
   const provider = getRunnerProvider();
-  const existing = [...jobs.values()].find(
-    (j) =>
-      j.projectId === input.projectId &&
-      j.taskId === input.taskId &&
-      (j.status === 'queued' || j.status === 'claiming' || j.status === 'running'),
-  );
-  if (existing) return existing;
+  const kind: RunnerJobKind = input.kind ?? 'task';
+  const taskId = input.taskId ?? '';
+
+  if (kind === 'task' && taskId) {
+    const existing = [...jobs.values()].find(
+      (j) =>
+        j.projectId === input.projectId &&
+        j.taskId === taskId &&
+        j.kind !== 'studio' &&
+        (j.status === 'queued' || j.status === 'claiming' || j.status === 'running'),
+    );
+    if (existing) return existing;
+  }
+
+  if (kind === 'studio' && input.studioKind) {
+    const existing = [...jobs.values()].find(
+      (j) =>
+        j.projectId === input.projectId &&
+        j.kind === 'studio' &&
+        j.studioKind === input.studioKind &&
+        (j.status === 'queued' || j.status === 'claiming' || j.status === 'running'),
+    );
+    if (existing) return existing;
+  }
 
   const blocked = runnerBlockReason(provider);
   if (blocked) {
     const failed: RunnerJob = {
       id: uuidv4(),
       projectId: input.projectId,
-      taskId: input.taskId,
+      taskId,
       autoRunId: input.autoRunId ?? null,
+      kind,
+      studioKind: input.studioKind,
+      prompt: input.prompt,
+      cwd: input.cwd,
       status: 'failed',
       agentName: provider,
       provider,
@@ -117,8 +144,12 @@ export function enqueueRunnerJob(input: {
   const job: RunnerJob = {
     id: uuidv4(),
     projectId: input.projectId,
-    taskId: input.taskId,
+    taskId,
     autoRunId: input.autoRunId ?? null,
+    kind,
+    studioKind: input.studioKind,
+    prompt: input.prompt,
+    cwd: input.cwd,
     status: 'queued',
     agentName: provider === 'opencode' ? 'opencode' : 'cursor-sdk',
     provider,
@@ -129,6 +160,10 @@ export function enqueueRunnerJob(input: {
   queue.push(job.id);
   void pump();
   return job;
+}
+
+export function getRunnerJob(jobId: string): RunnerJob | undefined {
+  return jobs.get(jobId);
 }
 
 export function cancelForAutoRun(autoRunId: string) {
@@ -163,6 +198,11 @@ async function pump() {
 async function runJob(jobId: string) {
   let job = jobs.get(jobId);
   if (!job) return;
+
+  if (job.kind === 'studio') {
+    await runStudioJob(jobId);
+    return;
+  }
 
   const provider = job.provider ?? getRunnerProvider();
   const controller = new AbortController();
@@ -321,6 +361,77 @@ async function runJob(jobId: string) {
   } finally {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     controllers.delete(jobId);
+  }
+}
+
+async function runStudioJob(jobId: string) {
+  let job = jobs.get(jobId);
+  if (!job) return;
+
+  const provider = job.provider ?? getRunnerProvider();
+  const controller = new AbortController();
+  controllers.set(jobId, controller);
+  const agentName = provider === 'opencode' ? 'opencode' : 'cursor-sdk';
+  const cwd = job.cwd;
+  const prompt = job.prompt;
+
+  try {
+    if (!cwd || !prompt) {
+      throw new Error('Studio job 缺少 cwd 或 prompt');
+    }
+
+    job = touch(job, { status: 'running', provider, agentName });
+    const label = provider === 'opencode' ? 'OpenCode' : 'Cursor SDK';
+    const name =
+      job.studioKind === 'design'
+        ? `pm-ai-design-${job.projectId.slice(0, 8)}`
+        : `pm-ai-req-${job.projectId.slice(0, 8)}`;
+
+    const outcome =
+      provider === 'opencode'
+        ? await runOpenCodePrompt({
+            prompt,
+            cwd,
+            taskId: job.studioKind ?? 'studio',
+            signal: controller.signal,
+          })
+        : await runCursorSdkPrompt({
+            prompt,
+            cwd,
+            name,
+            signal: controller.signal,
+          });
+
+    job = touch(job, { sdkRunId: outcome.runId ?? null });
+
+    if (outcome.ok) {
+      const summary = (outcome.resultText ?? `${label} 已完成`).slice(0, 4000);
+      const done = touch(job, { status: 'completed', resultSummary: summary });
+      await notifyStudioJobFinished(done);
+    } else if (outcome.status === 'cancelled' || controller.signal.aborted) {
+      touch(job, { status: 'cancelled', error: outcome.error ?? '已取消' });
+    } else {
+      const failed = touch(job, {
+        status: 'failed',
+        error: outcome.error ?? `狀態 ${outcome.status}`,
+      });
+      await notifyStudioJobFinished(failed);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const failed = touch(job, { status: 'failed', error: message });
+    await notifyStudioJobFinished(failed);
+  } finally {
+    controllers.delete(jobId);
+  }
+}
+
+async function notifyStudioJobFinished(job: RunnerJob) {
+  try {
+    const { recordStudioOutcome } = await import('../services/studio-ai.js');
+    recordStudioOutcome(job);
+  } catch {
+    /* optional */
   }
 }
 

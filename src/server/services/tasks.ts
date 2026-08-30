@@ -1358,7 +1358,7 @@ export function initializeProject(projectId: string) {
     writeProjectConfig(workspacePath, {
       ...existingConfig,
       name: project.name,
-      description: project.description,
+      description: project.description ?? '',
       status: project.archived ? 'archived' : 'active',
     });
   } else {
@@ -1366,7 +1366,7 @@ export function initializeProject(projectId: string) {
     writeProjectConfig(workspacePath, {
       id: projectId,
       name: project.name,
-      description: project.description,
+      description: project.description ?? '',
       schema_version: 1,
       created_at: project.createdAt,
       status: project.archived ? 'archived' : 'active',

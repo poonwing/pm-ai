@@ -303,7 +303,7 @@ function createIsolatedOpencodeServer(options: {
   };
 
   return new Promise((resolve, reject) => {
-    let clear = () => undefined;
+    let clear: () => void = () => undefined;
     const timer = setTimeout(() => {
       clear();
       stopProc(proc);

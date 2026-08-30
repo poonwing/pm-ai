@@ -648,6 +648,8 @@ export const autoApi = {
       jobs: Array<{
         id: string;
         taskId: string;
+        kind?: 'task' | 'studio';
+        studioKind?: 'requirements' | 'design';
         status: string;
         agentName: string;
         provider?: string;
@@ -657,3 +659,120 @@ export const autoApi = {
       }>;
     }>(`/projects/${projectId}/runner/status`),
 };
+
+export interface StudioMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  engine?: 'internal' | 'external';
+  at: string;
+}
+
+export interface RequirementsDoc {
+  markdown: string;
+  updatedAt: string | null;
+  exists: boolean;
+}
+
+export interface DesignItem {
+  id: string;
+  title: string;
+  slug: string;
+  updatedAt: string;
+}
+
+export interface DesignRecord extends DesignItem {
+  html: string;
+}
+
+async function downloadFile(apiPath: string, fallbackName: string) {
+  const token = await fetchToken();
+  const res = await fetch(`/api/v1${apiPath}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'X-PM-AI-Actor': 'human',
+    },
+  });
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({ error: res.statusText }))) as { error: string };
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  const blob = await res.blob();
+  const cd = res.headers.get('Content-Disposition');
+  const match = cd?.match(/filename="([^"]+)"/);
+  const name = match?.[1] ?? fallbackName;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export const requirementsApi = {
+  get: (projectId: string) => api<RequirementsDoc>(`/projects/${projectId}/requirements`),
+  save: (projectId: string, markdown: string) =>
+    api<RequirementsDoc>(`/projects/${projectId}/requirements`, {
+      method: 'PUT',
+      body: JSON.stringify({ markdown }),
+    }),
+  messages: (projectId: string) =>
+    api<StudioMessage[]>(`/projects/${projectId}/requirements/messages`),
+  analyze: (
+    projectId: string,
+    data: { source: 'prompt' | 'codebase'; message: string },
+  ) =>
+    api<{
+      markdown: string;
+      updatedAt: string | null;
+      messages: StudioMessage[];
+    }>(`/projects/${projectId}/requirements/analyze`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  download: (projectId: string) =>
+    downloadFile(`/projects/${projectId}/requirements/download`, 'requirements.md'),
+};
+
+export const designsApi = {
+  list: (projectId: string) => api<DesignItem[]>(`/projects/${projectId}/designs`),
+  create: (projectId: string, title: string) =>
+    api<DesignRecord>(`/projects/${projectId}/designs`, {
+      method: 'POST',
+      body: JSON.stringify({ title }),
+    }),
+  get: (projectId: string, designId: string) =>
+    api<DesignRecord>(`/projects/${projectId}/designs/${designId}`),
+  update: (projectId: string, designId: string, data: { title?: string; html?: string }) =>
+    api<DesignRecord>(`/projects/${projectId}/designs/${designId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  delete: (projectId: string, designId: string) =>
+    api<{ deleted: boolean; id: string }>(`/projects/${projectId}/designs/${designId}`, {
+      method: 'DELETE',
+    }),
+  messages: (projectId: string) => api<StudioMessage[]>(`/projects/${projectId}/designs/messages`),
+  generate: (
+    projectId: string,
+    data: {
+      message: string;
+      design_id?: string;
+      title?: string;
+    },
+  ) =>
+    api<{
+      design: DesignRecord;
+      designs: DesignItem[];
+      messages: StudioMessage[];
+    }>(`/projects/${projectId}/designs/generate`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  download: (projectId: string, designId: string) =>
+    downloadFile(`/projects/${projectId}/designs/${designId}/download`, 'design.html'),
+};
+
+

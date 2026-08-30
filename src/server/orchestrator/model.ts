@@ -33,7 +33,7 @@ export function isModelConfigured(): boolean {
   return Boolean(getModelConfig().apiKey);
 }
 
-export function createChatClient() {
+export function createChatClient(timeoutMs = 60_000) {
   const cfg = getModelConfig();
   if (!cfg.apiKey) {
     throw new ValidationError('未設定 ZAI_API_KEY（請在專案根目錄 .env 配置）');
@@ -41,7 +41,7 @@ export function createChatClient() {
   return new OpenAI({
     apiKey: cfg.apiKey,
     baseURL: cfg.baseURL.replace(/\/?$/, '/'),
-    timeout: 60_000,
+    timeout: timeoutMs,
     maxRetries: 0,
   });
 }
@@ -58,13 +58,20 @@ function collectErrorCodes(err: unknown): string[] {
   return codes;
 }
 
+function isTimeoutError(err: unknown): boolean {
+  const codes = collectErrorCodes(err);
+  const msg = err instanceof Error ? err.message : String(err);
+  return codes.includes('APITimeoutError') || /timed? ?out/i.test(msg);
+}
+
 function isRetryableConnectionError(err: unknown): boolean {
+  if (isTimeoutError(err)) return false;
   const codes = collectErrorCodes(err);
   const msg = err instanceof Error ? err.message : String(err);
   return (
     codes.includes('APIConnectionError') ||
     codes.some((code) => CONNECT_RETRY_CODES.has(code)) ||
-    /fetch failed|other side closed|socket|timed? ?out/i.test(msg)
+    /fetch failed|other side closed|socket/i.test(msg)
   );
 }
 
@@ -83,6 +90,11 @@ function formatModelError(err: unknown): Error {
       `GLM 1113 余额不足或无可用资源包。若你用的是 Coding Plan：请确认 .env 中 ZAI_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4 且 ZAI_MODEL 为 glm-4.7/glm-5.3 等套餐模型；通用 /api/paas/v4 不会走 Coding 额度。也可到智谱控制台检查套餐用量或账户余额。原始信息：${msg}`,
     );
   }
+  if (isTimeoutError(err)) {
+    return new ValidationError(
+      '模型回應逾時。UI 設計稿較長時常見，請再試一次，或把這輪說明寫短一點（先結構再補樣式）。',
+    );
+  }
   if (isRetryableConnectionError(err)) {
     const { baseURL } = getModelConfig();
     return new ValidationError(
@@ -94,11 +106,12 @@ function formatModelError(err: unknown): Error {
 
 export async function chatCompletion(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-  opts?: { temperature?: number; json?: boolean },
+  opts?: { temperature?: number; json?: boolean; timeoutMs?: number; maxAttempts?: number },
 ): Promise<string> {
-  const client = createChatClient();
+  const timeoutMs = opts?.timeoutMs ?? 60_000;
+  const client = createChatClient(timeoutMs);
   const cfg = getModelConfig();
-  const maxAttempts = 3;
+  const maxAttempts = opts?.maxAttempts ?? 3;
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {

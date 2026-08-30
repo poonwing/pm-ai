@@ -113,6 +113,26 @@ export function Layout() {
               總覽
             </NavLink>
             <NavLink
+              to={`/projects/${projectId}/requirements`}
+              className={({ isActive }) =>
+                `block px-3 py-2 rounded-md text-sm transition-colors ${
+                  isActive ? 'bg-accent font-medium' : 'text-muted-foreground hover:bg-accent/50'
+                }`
+              }
+            >
+              需求分析
+            </NavLink>
+            <NavLink
+              to={`/projects/${projectId}/designs`}
+              className={({ isActive }) =>
+                `block px-3 py-2 rounded-md text-sm transition-colors ${
+                  isActive ? 'bg-accent font-medium' : 'text-muted-foreground hover:bg-accent/50'
+                }`
+              }
+            >
+              UI 設計
+            </NavLink>
+            <NavLink
               to={`/projects/${projectId}/tasks`}
               className={({ isActive }) =>
                 `block px-3 py-2 rounded-md text-sm transition-colors ${
