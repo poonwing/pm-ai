@@ -23,14 +23,16 @@ import {
 } from '../services/agents.js';
 import {
   createTask,
+  forceUnlockTask,
   getInbox,
   getProject,
   getTask,
   listProjectTasks,
+  reopenTask,
   updateProject,
   ValidationError,
 } from '../services/tasks.js';
-import { chatCompletion, isModelConfigured } from './model.js';
+import { chatCompletion, isModelConfigured, isRetryableConnectionError } from './model.js';
 import { dispatchPendingAiReviews } from './ai-review.js';
 import { isPendingReview, type ReviewPolicy } from '../../shared/schemas.js';
 import {
@@ -187,6 +189,207 @@ function isExplicitReplanRequest(message: string): boolean {
   const t = message.trim();
   if (/^\/(replan|plan|tick)\b/i.test(t)) return true;
   return /重新規劃|重新计划|再規劃|再计划|重新分派|再分派/.test(t);
+}
+
+/** User asks to retry failed Runner jobs while waiting on tasks. */
+function isRetryRunnerRequest(message: string): boolean {
+  const t = message.trim();
+  if (/^\/retry\b/i.test(t)) return true;
+  return /重試|重试|再試|再试|重新執行|重新执行|重新跑|再跑一遍/.test(t);
+}
+
+const RUNNER_ORCH_MAX_RETRIES = 2;
+
+function runnerRetryCountsFromCheckpoint(
+  checkpoint: Record<string, unknown> | undefined | null,
+): Record<string, number> {
+  const raw = checkpoint?.runner_retry_counts;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  return raw as Record<string, number>;
+}
+
+function runnerStallNotifiedFromCheckpoint(
+  checkpoint: Record<string, unknown> | undefined | null,
+): string[] {
+  const raw = checkpoint?.runner_stall_notified;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((id) => typeof id === 'string');
+}
+
+function createdTaskIdsFromCheckpoint(
+  checkpoint: Record<string, unknown> | undefined | null,
+): string[] {
+  const raw = checkpoint?.created_task_ids;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((id) => typeof id === 'string');
+}
+
+function collectRunTaskIds(
+  run: ReturnType<typeof getAutoRun>,
+  opts?: { includeAllPending?: boolean },
+): string[] {
+  const ids = new Set<string>();
+  for (const id of createdTaskIdsFromCheckpoint(run.checkpoint)) ids.add(id);
+  const researchId = run.checkpoint.research_task_id;
+  if (typeof researchId === 'string') ids.add(researchId);
+
+  if (opts?.includeAllPending) {
+    for (const t of listProjectTasks(run.project_id)) {
+      if (t.status === 'todo' || t.status === 'in_progress') ids.add(t.id);
+    }
+  }
+
+  return [...ids];
+}
+
+function hasActiveRunnerJob(
+  jobs: ReturnType<typeof getRunnerStatus>['jobs'],
+  taskId: string,
+): boolean {
+  return jobs.some(
+    (j) =>
+      j.taskId === taskId &&
+      (j.status === 'queued' || j.status === 'claiming' || j.status === 'running'),
+  );
+}
+
+function latestRunnerJob(
+  jobs: ReturnType<typeof getRunnerStatus>['jobs'],
+  taskId: string,
+) {
+  return jobs
+    .filter((j) => j.taskId === taskId)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+}
+
+/** Reset stuck in_progress (no lease) back to todo so Runner can claim again. */
+function prepareTaskForRunnerRetry(projectId: string, taskId: string) {
+  const task = getTask(projectId, taskId);
+  if (task.status !== 'in_progress') return task;
+  if (task.lease?.leaseToken) return task;
+  try {
+    forceUnlockTask(projectId, taskId);
+  } catch {
+    /* ignore */
+  }
+  try {
+    return reopenTask(projectId, taskId);
+  } catch {
+    return getTask(projectId, taskId);
+  }
+}
+
+/** Re-queue todo tasks whose Runner job failed (transient errors), so Auto Run does not stall. */
+async function reconcileRunnerFailures(runId: string, opts?: { force?: boolean }): Promise<string[]> {
+  const run = getAutoRun(runId);
+  const taskIds = collectRunTaskIds(run, { includeAllPending: opts?.force });
+  if (!taskIds.length) return [];
+
+  const allJobs = getRunnerStatus(run.project_id).jobs;
+  const retryCounts = { ...runnerRetryCountsFromCheckpoint(run.checkpoint) };
+  const stallNotified = [...runnerStallNotifiedFromCheckpoint(run.checkpoint)];
+  const requeued: string[] = [];
+  let checkpointPatch: Record<string, unknown> | null = null;
+
+  for (const taskId of taskIds) {
+    let task: ReturnType<typeof getTask>;
+    try {
+      task = getTask(run.project_id, taskId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      appendRunMessage(runId, 'system', `重試跳過 ${taskId}：${msg}`);
+      continue;
+    }
+    if (task.status === 'done' || task.status === 'cancelled') continue;
+
+    if (hasActiveRunnerJob(allJobs, taskId)) continue;
+
+    if (opts?.force) {
+      task = prepareTaskForRunnerRetry(run.project_id, taskId);
+      if (task.status !== 'todo' && task.status !== 'in_progress') continue;
+      if (task.status === 'in_progress' && !task.lease?.leaseToken) continue;
+
+      const { enqueueRunnerJob } = await import('../runner/index.js');
+      const job = enqueueRunnerJob({
+        projectId: run.project_id,
+        taskId,
+        autoRunId: runId,
+      });
+      if (job.status !== 'failed') {
+        requeued.push(taskId);
+      }
+      continue;
+    }
+
+    task = prepareTaskForRunnerRetry(run.project_id, taskId);
+    if (task.status !== 'todo') continue;
+
+    const terminal = latestRunnerJob(allJobs, taskId);
+    const err = terminal?.error ?? '';
+    const shouldRetryWithoutJob =
+      !terminal || terminal.status === 'failed' || terminal.status === 'cancelled';
+
+    if (!shouldRetryWithoutJob) continue;
+
+    const retryable = isRetryableConnectionError(err) || !terminal || terminal.status === 'cancelled';
+    if (!retryable) {
+      if (!stallNotified.includes(taskId)) {
+        stallNotified.push(taskId);
+        appendRunMessage(
+          runId,
+          'assistant',
+          `任務 ${taskId} Runner 失敗且無法自動重試：${err}。請修正配置或網路後回覆「重試」，或點「推進一步」。`,
+        );
+        checkpointPatch = {
+          runner_stall_notified: stallNotified,
+        };
+      }
+      continue;
+    }
+
+    const count = retryCounts[taskId] ?? 0;
+    if (count >= RUNNER_ORCH_MAX_RETRIES) {
+      if (!stallNotified.includes(taskId)) {
+        stallNotified.push(taskId);
+        appendRunMessage(
+          runId,
+          'assistant',
+          `任務 ${taskId} Runner 已重試 ${RUNNER_ORCH_MAX_RETRIES} 次仍失敗（${err}）。請檢查 CURSOR_API_KEY / 網路，修好後回覆「重試」。`,
+        );
+        checkpointPatch = {
+          runner_stall_notified: stallNotified,
+        };
+      }
+      continue;
+    }
+
+    const { enqueueRunnerJob } = await import('../runner/index.js');
+    const job = enqueueRunnerJob({
+      projectId: run.project_id,
+      taskId,
+      autoRunId: runId,
+    });
+    if (job.status === 'failed') continue;
+    retryCounts[taskId] = count + 1;
+    requeued.push(taskId);
+  }
+
+  if (requeued.length || checkpointPatch) {
+    updateAutoRun(runId, {
+      checkpoint: {
+        ...run.checkpoint,
+        ...(requeued.length ? { runner_retry_counts: retryCounts } : {}),
+        ...(checkpointPatch ?? {}),
+      },
+    });
+    appendRunMessage(
+      runId,
+      'system',
+      `已重新提交 Runner：${requeued.join(', ')}`,
+    );
+  }
+
+  return requeued;
 }
 
 type ParsedDecisionReply = { optionId: string; note?: string };
@@ -770,6 +973,37 @@ export async function messageOrchestrator(runId: string, message: string) {
     return runIntakeClarify(runId);
   }
 
+  latest = getAutoRun(runId);
+
+  if (isRetryRunnerRequest(message)) {
+    appendRunMessage(runId, 'assistant', '收到，正在重新提交失敗的 Runner 任務…');
+    const requeued = await reconcileRunnerFailures(runId, { force: true });
+    if (!requeued.length) {
+      const pending = listProjectTasks(latest.project_id).filter(
+        (t) => t.status === 'todo' || t.status === 'in_progress',
+      );
+      const activeJobs = getRunnerStatus(latest.project_id).jobs.filter(
+        (j) => j.status === 'queued' || j.status === 'claiming' || j.status === 'running',
+      );
+      if (activeJobs.length) {
+        appendRunMessage(
+          runId,
+          'assistant',
+          `Runner 仍在執行中：${activeJobs.map((j) => j.taskId).join(', ')}。請稍候或停止 Auto Run 後再重試。`,
+        );
+      } else if (!pending.length) {
+        appendRunMessage(runId, 'assistant', '沒有待處理任務（todo / in_progress）。');
+      } else {
+        appendRunMessage(
+          runId,
+          'assistant',
+          `有待處理任務 ${pending.map((t) => t.id).join(', ')}，但未能提交 Runner。請確認 Runner 已配置（CURSOR_API_KEY 或 OpenCode），或到任務詳情手動操作。`,
+        );
+      }
+    }
+    return runResult(runId);
+  }
+
   if (isWaitingPhase(latest.phase)) {
     if (isExplicitReplanRequest(message)) {
       appendRunMessage(runId, 'assistant', '收到，將依你的補充重新規劃與分派…');
@@ -864,6 +1098,7 @@ async function tickOrchestratorUnlocked(
         `已啟動 AI 復查：${started.join(', ')}`,
       );
     }
+    await reconcileRunnerFailures(runId);
     synthesizeProgress(run.project_id, runId);
     return runResult(runId);
   }

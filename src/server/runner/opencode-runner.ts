@@ -6,6 +6,7 @@ import { spawn, type ChildProcess } from 'child_process';
 import { createOpencodeClient, type Part } from '@opencode-ai/sdk';
 import { ensureOpenCodeCliOnPath, OPENCODE_CLI_INSTALL_HINT } from './opencode-cli.js';
 import { getOpenCodeRunnerConfig } from './types.js';
+import type { RunnerLogKind } from './logs.js';
 
 export interface OpenCodeRunOutcome {
   ok: boolean;
@@ -76,7 +77,9 @@ export async function runOpenCodePrompt(input: {
   cwd: string;
   taskId: string;
   signal?: AbortSignal;
+  onLog?: (kind: RunnerLogKind, text: string) => void;
 }): Promise<OpenCodeRunOutcome> {
+  const log = (kind: RunnerLogKind, text: string) => input.onLog?.(kind, text);
   const cfg = getOpenCodeRunnerConfig();
   if (!cfg.apiKey) {
     return { ok: false, status: 'error', error: '未配置 ZAI_API_KEY（OpenCode 复用 GLM Key）' };
@@ -107,6 +110,7 @@ export async function runOpenCodePrompt(input: {
   input.signal?.addEventListener('abort', onAbort, { once: true });
 
   try {
+    log('system', '正在啟動 OpenCode 服務…');
     // Ensure child `opencode serve` can read GLM key from env as well.
     process.env.ZAI_API_KEY = cfg.apiKey;
     process.env.ZHIPU_API_KEY = cfg.apiKey;
@@ -148,7 +152,9 @@ export async function runOpenCodePrompt(input: {
     }
 
     sessionId = created.data.id;
+    log('system', `OpenCode session 已建立：${sessionId}`);
 
+    log('system', '正在發送任務 prompt…');
     const prompted = await client.session.prompt({
       path: { id: sessionId },
       query: { directory: input.cwd },
@@ -196,6 +202,7 @@ export async function runOpenCodePrompt(input: {
     }
 
     const text = extractText(prompted.data.parts) || 'OpenCode 执行完成';
+    if (text) log('assistant', text);
     return {
       ok: true,
       status: 'finished',

@@ -131,7 +131,14 @@ export function updateAutoRun(
       goal: patch.goal ?? row.goal,
       checkpointJson:
         patch.checkpoint !== undefined
-          ? JSON.stringify(patch.checkpoint)
+          ? (() => {
+              try {
+                return JSON.stringify(patch.checkpoint);
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                throw new ValidationError(`無法保存 Run checkpoint：${msg}`);
+              }
+            })()
           : row.checkpointJson,
       updatedAt: now(),
     })

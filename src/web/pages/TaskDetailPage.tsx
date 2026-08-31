@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { Diff, Hunk, parseDiff } from 'react-diff-view';
-import { tasksApi, projectsApi, Task, Project, TaskChangesSummary, FileDiffResponse, TaskGitStatus } from '../lib/api';
+import { tasksApi, projectsApi, Task, Project, TaskChangesSummary, FileDiffResponse, TaskGitStatus, RunnerLogEntry, RunnerJobInfo } from '../lib/api';
 import { Button, Badge, Input, Textarea, Label, Dialog } from '../components/ui';
 import { formatRelativeTime, statusLabel, statusColor } from '../lib/utils';
 
@@ -366,6 +366,8 @@ export function TaskDetailPage() {
             onAction={doAction}
             onRefresh={load}
           />
+
+          <RunnerLogPanel task={task} projectId={projectId!} />
 
           {task.activities && task.activities.filter((a) => a.action !== 'commented').length > 0 && (
             <section className="rounded-lg border border-border p-4">
@@ -732,6 +734,219 @@ function ChangesPanel({
             )}
           </div>
         </div>
+      )}
+    </section>
+  );
+}
+
+const RUNNER_STATUS_LABEL: Record<string, string> = {
+  queued: '排隊中',
+  claiming: '認領中',
+  running: '執行中',
+  completed: '已完成',
+  failed: '失敗',
+  cancelled: '已取消',
+};
+
+const LOG_KIND_LABEL: Record<RunnerLogEntry['kind'], string> = {
+  system: '系統',
+  assistant: 'Agent',
+  tool: '工具',
+  thinking: '思考',
+  error: '錯誤',
+};
+
+function coalesceLogEntries(entries: RunnerLogEntry[]): RunnerLogEntry[] {
+  const result: RunnerLogEntry[] = [];
+  for (const entry of entries) {
+    const prev = result[result.length - 1];
+    if (
+      prev &&
+      prev.kind === entry.kind &&
+      (entry.kind === 'assistant' || entry.kind === 'thinking')
+    ) {
+      if (entry.text.startsWith(prev.text)) {
+        prev.text = entry.text;
+      } else if (!prev.text.endsWith(entry.text)) {
+        prev.text = `${prev.text}${entry.text}`;
+      }
+      prev.at = entry.at;
+      continue;
+    }
+    result.push({ ...entry });
+  }
+  return result;
+}
+
+function RunnerLogPanel({ task, projectId }: { task: Task; projectId: string }) {
+  const [entries, setEntries] = useState<RunnerLogEntry[]>([]);
+  const [job, setJob] = useState<RunnerJobInfo | null>(null);
+  const [streaming, setStreaming] = useState(false);
+  const [streamError, setStreamError] = useState('');
+  const [expanded, setExpanded] = useState(true);
+  const latestSeqRef = useRef(0);
+  const logEndRef = useRef<HTMLDivElement>(null);
+  const isActive =
+    task.status === 'in_progress' ||
+    ['queued', 'claiming', 'running'].includes(job?.status ?? '');
+
+  const mergeEntries = useCallback((incoming: RunnerLogEntry[]) => {
+    if (incoming.length === 0) return;
+    setEntries((prev) => {
+      const bySeq = new Map(prev.map((e) => [e.seq, { ...e }]));
+      for (const entry of incoming) {
+        bySeq.set(entry.seq, { ...entry });
+      }
+      const merged = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+      const coalesced = coalesceLogEntries(merged);
+      if (coalesced.length > 500) return coalesced.slice(-500);
+      return coalesced;
+    });
+    const maxSeq = Math.max(...incoming.map((e) => e.seq));
+    if (maxSeq > latestSeqRef.current) latestSeqRef.current = maxSeq;
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    tasksApi
+      .getRunnerLogs(projectId, task.id, latestSeqRef.current)
+      .then((data) => {
+        if (cancelled) return;
+        mergeEntries(data.entries);
+        setJob(data.job);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, task.id, mergeEntries]);
+
+  useEffect(() => {
+    if (!isActive) {
+      setStreaming(false);
+      return;
+    }
+
+    setExpanded(true);
+    setStreamError('');
+    const controller = new AbortController();
+    setStreaming(true);
+
+    void tasksApi.streamRunnerLogs(
+      projectId,
+      task.id,
+      {
+        onInit: (data) => {
+          mergeEntries(data.entries);
+          latestSeqRef.current = data.latestSeq;
+          setJob(data.job);
+        },
+        onLog: (entry) => {
+          mergeEntries([entry]);
+        },
+        onDone: (data) => {
+          setJob(data.job);
+          setStreaming(false);
+        },
+        onError: (err) => {
+          setStreamError(err.message);
+          setStreaming(false);
+        },
+      },
+      { sinceSeq: latestSeqRef.current, signal: controller.signal },
+    );
+
+    return () => {
+      controller.abort();
+      setStreaming(false);
+    };
+  }, [projectId, task.id, isActive, mergeEntries]);
+
+  useEffect(() => {
+    if (expanded) {
+      logEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [entries, expanded]);
+
+  if (entries.length === 0 && !isActive && !job) return null;
+
+  const jobStatus = job?.status ?? (task.status === 'in_progress' ? 'running' : null);
+
+  return (
+    <section className="rounded-lg border border-border p-4">
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <h3 className="text-sm font-semibold">AI 工作流</h3>
+        <div className="flex items-center gap-2">
+          {jobStatus && (
+            <Badge className={jobStatus === 'running' ? 'bg-amber-100 text-amber-800' : 'bg-zinc-100'}>
+              {RUNNER_STATUS_LABEL[jobStatus] ?? jobStatus}
+            </Badge>
+          )}
+          {streaming && <span className="text-[11px] text-green-700">即時串流中</span>}
+        </div>
+      </div>
+
+      {job && (
+        <dl className="text-xs flex flex-col gap-1 mb-3">
+          <div className="flex justify-between gap-2">
+            <dt className="text-muted-foreground shrink-0">執行者</dt>
+            <dd>{job.agentName}</dd>
+          </div>
+          {job.provider && (
+            <div className="flex justify-between gap-2">
+              <dt className="text-muted-foreground shrink-0">Provider</dt>
+              <dd className="font-mono">{job.provider}</dd>
+            </div>
+          )}
+          {job.error && (
+            <div className="text-red-600 whitespace-pre-wrap">{job.error}</div>
+          )}
+        </dl>
+      )}
+
+      {streamError && (
+        <p className="text-xs text-amber-700 mb-2">
+          串流中斷：{streamError}（仍會顯示已收到的日誌）
+        </p>
+      )}
+
+      {entries.length > 0 && (
+        <>
+          <Button size="sm" variant="ghost" className="mb-2" onClick={() => setExpanded((v) => !v)}>
+            {expanded ? '收合輸出' : '展開輸出'}
+          </Button>
+          {expanded && (
+            <div className="rounded bg-muted max-h-72 overflow-auto p-2 font-mono text-[11px] leading-relaxed">
+              {entries.map((entry) => (
+                <div key={entry.seq} className="mb-2 last:mb-0">
+                  <div className="text-muted-foreground mb-0.5">
+                    {formatRelativeTime(entry.at)}
+                    {' · '}
+                    <span
+                      className={
+                        entry.kind === 'error'
+                          ? 'text-red-600'
+                          : entry.kind === 'tool'
+                            ? 'text-blue-700'
+                            : entry.kind === 'assistant'
+                              ? 'text-amber-800'
+                              : ''
+                      }
+                    >
+                      {LOG_KIND_LABEL[entry.kind]}
+                    </span>
+                  </div>
+                  <pre className="whitespace-pre-wrap break-words">{entry.text}</pre>
+                </div>
+              ))}
+              <div ref={logEndRef} />
+            </div>
+          )}
+        </>
+      )}
+
+      {entries.length === 0 && isActive && (
+        <p className="text-xs text-muted-foreground">Agent 正在啟動，等待工作流輸出…</p>
       )}
     </section>
   );

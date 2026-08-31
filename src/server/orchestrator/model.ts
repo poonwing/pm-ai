@@ -64,7 +64,7 @@ function isTimeoutError(err: unknown): boolean {
   return codes.includes('APITimeoutError') || /timed? ?out/i.test(msg);
 }
 
-function isRetryableConnectionError(err: unknown): boolean {
+export function isRetryableConnectionError(err: unknown): boolean {
   if (isTimeoutError(err)) return false;
   const codes = collectErrorCodes(err);
   const msg = err instanceof Error ? err.message : String(err);

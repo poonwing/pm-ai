@@ -3,9 +3,18 @@ export {
   cancelForAutoRun,
   getRunnerStatus,
   getRunnerJob,
+  getLatestRunnerJobForTask,
   type RunnerJob,
   type RunnerJobStatus,
 } from './queue.js';
+export {
+  appendRunnerLog,
+  updateOrAppendRunnerLog,
+  getRunnerLogs,
+  subscribeRunnerLogs,
+  type RunnerLogEntry,
+  type RunnerLogKind,
+} from './logs.js';
 export {
   isCursorRunnerConfigured,
   isOpenCodeRunnerConfigured,

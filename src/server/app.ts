@@ -61,7 +61,12 @@ import * as agentsService from './services/agents.js';
 import * as autoService from './services/auto.js';
 import * as orchestrator from './orchestrator/index.js';
 import { isModelConfigured } from './orchestrator/model.js';
-import { getRunnerStatus } from './runner/index.js';
+import {
+  getRunnerStatus,
+  getRunnerLogs,
+  getLatestRunnerJobForTask,
+  subscribeRunnerLogs,
+} from './runner/index.js';
 import * as requirementsService from './services/requirements.js';
 import * as designsService from './services/designs.js';
 
@@ -92,6 +97,35 @@ function requireProjectId(c: Context): string {
   return projectId;
 }
 
+function extractErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message || '內部錯誤';
+  if (typeof err === 'string') return err;
+  if (err == null) return '內部錯誤';
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
+/** Avoid Node util.inspect crashes on exotic thrown values (e.g. some native / SDK errors). */
+function logServerError(err: unknown) {
+  try {
+    if (err == null) {
+      console.error('[pm-ai] internal error (null/undefined)');
+      return;
+    }
+    if (err instanceof Error) {
+      console.error(`[pm-ai] ${err.name}: ${err.message}`);
+      if (err.stack) console.error(err.stack);
+      return;
+    }
+    console.error('[pm-ai]', extractErrorMessage(err));
+  } catch {
+    console.error('[pm-ai] internal error (could not format)');
+  }
+}
+
 function errorResponse(c: Context, err: unknown) {
   if (err instanceof NotFoundError) {
     return c.json({ error: err.message, code: 'NOT_FOUND' }, 404);
@@ -114,8 +148,8 @@ function errorResponse(c: Context, err: unknown) {
   if (err instanceof ValidationError) {
     return c.json({ error: err.message, code: 'VALIDATION' }, 400);
   }
-  console.error(err);
-  return c.json({ error: '內部錯誤', code: 'INTERNAL' }, 500);
+  logServerError(err);
+  return c.json({ error: extractErrorMessage(err), code: 'INTERNAL' }, 500);
 }
 
 function authMiddleware(actor: 'human' | 'agent' | 'orchestrator' | 'any' | 'human_or_orchestrator') {
@@ -644,6 +678,94 @@ app.post('/api/v1/tasks/:id/preview/stop', authMiddleware('human'), async (c) =>
     if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
     const task = await taskService.stopTaskPreview(projectId, requireParam(c, 'id'));
     return c.json(task);
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.get('/api/v1/tasks/:id/runner/logs', authMiddleware('any'), (c) => {
+  try {
+    const projectId = requireProjectId(c);
+    const taskId = requireParam(c, 'id');
+    const sinceSeq = Number(c.req.query('since_seq') ?? '0') || 0;
+    const { entries, latestSeq } = getRunnerLogs(projectId, taskId, sinceSeq);
+    const job = getLatestRunnerJobForTask(projectId, taskId);
+    return c.json({ entries, latestSeq, job });
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.get('/api/v1/tasks/:id/runner/stream', authMiddleware('any'), (c) => {
+  try {
+    const projectId = requireProjectId(c);
+    const taskId = requireParam(c, 'id');
+    const sinceSeq = Number(c.req.query('since_seq') ?? '0') || 0;
+    const encoder = new TextEncoder();
+    let unsubscribe: (() => void) | null = null;
+    let closed = false;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let jobTimer: ReturnType<typeof setInterval> | null = null;
+
+    const cleanup = (controller: ReadableStreamDefaultController<Uint8Array>) => {
+      if (closed) return;
+      closed = true;
+      unsubscribe?.();
+      unsubscribe = null;
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (jobTimer) clearInterval(jobTimer);
+      try {
+        controller.close();
+      } catch {
+        /* already closed */
+      }
+    };
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const send = (event: string, data: unknown) => {
+          if (closed) return;
+          controller.enqueue(
+            encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+          );
+        };
+
+        const { entries, latestSeq } = getRunnerLogs(projectId, taskId, sinceSeq);
+        let lastSeq = latestSeq;
+        send('init', { entries, latestSeq, job: getLatestRunnerJobForTask(projectId, taskId) });
+
+        unsubscribe = subscribeRunnerLogs(projectId, taskId, (entry) => {
+          send('log', entry);
+          lastSeq = entry.seq;
+        });
+
+        heartbeatTimer = setInterval(() => {
+          send('ping', { at: new Date().toISOString(), latestSeq: lastSeq });
+        }, 15000);
+
+        jobTimer = setInterval(() => {
+          const job = getLatestRunnerJobForTask(projectId, taskId);
+          if (job && ['completed', 'failed', 'cancelled'].includes(job.status)) {
+            send('done', { job, latestSeq: lastSeq });
+            cleanup(controller);
+          }
+        }, 2000);
+      },
+      cancel() {
+        closed = true;
+        unsubscribe?.();
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
+        if (jobTimer) clearInterval(jobTimer);
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      },
+    });
   } catch (err) {
     return errorResponse(c, err);
   }

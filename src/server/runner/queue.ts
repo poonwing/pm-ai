@@ -13,6 +13,8 @@ import { runCursorSdkPrompt } from './cursor-sdk-runner.js';
 import { runOpenCodePrompt } from './opencode-runner.js';
 import { isOpenCodeCliInstalled, OPENCODE_CLI_INSTALL_HINT } from './opencode-cli.js';
 import { buildRunnerPrompt } from './prompt.js';
+import { isRetryableConnectionError } from '../orchestrator/model.js';
+import { appendRunnerLog, updateOrAppendRunnerLog } from './logs.js';
 import {
   getRunnerConcurrency,
   getRunnerProvider,
@@ -24,6 +26,25 @@ import {
   type RunnerJobKind,
   type StudioKind,
 } from './types.js';
+
+const RUNNER_PROMPT_MAX_ATTEMPTS = 3;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function notifyRunnerTaskEvent(
+  projectId: string,
+  taskId: string,
+  event: 'runner_failed' | 'runner_completed',
+) {
+  // Defer so Auto Run message/tick handlers finish before nested tick.
+  setImmediate(() => {
+    void import('../orchestrator/index.js')
+      .then((m) => m.onTaskEvent(projectId, taskId, event))
+      .catch(() => undefined);
+  });
+}
 
 const jobs = new Map<string, RunnerJob>();
 const queue: string[] = [];
@@ -45,6 +66,16 @@ function listJobsForProject(projectId: string): RunnerJob[] {
   return [...jobs.values()]
     .filter((j) => j.projectId === projectId)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+export function getLatestRunnerJobForTask(
+  projectId: string,
+  taskId: string,
+): RunnerJob | null {
+  const matching = [...jobs.values()]
+    .filter((j) => j.projectId === projectId && j.taskId === taskId)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  return matching[0] ?? null;
 }
 
 function missingKeyMessage(provider: RunnerProvider): string {
@@ -214,6 +245,7 @@ async function runJob(jobId: string) {
 
   try {
     job = touch(job, { status: 'claiming', provider });
+    appendRunnerLog(job.projectId, job.taskId, 'system', 'Runner 正在認領任務…');
     const task = getTask(job.projectId, job.taskId);
     agentName = String(task.assignee_name || task.assignee_agent_id || agentName);
 
@@ -243,6 +275,14 @@ async function runJob(jobId: string) {
 
     job = touch(job, { status: 'running', agentName });
 
+    const onLog = (kind: 'system' | 'assistant' | 'tool' | 'thinking' | 'error', text: string) => {
+      if (kind === 'assistant' || kind === 'thinking') {
+        updateOrAppendRunnerLog(job!.projectId, job!.taskId, kind, text);
+      } else {
+        appendRunnerLog(job!.projectId, job!.taskId, kind, text);
+      }
+    };
+
     if (leaseToken) {
       heartbeatTimer = setInterval(() => {
         try {
@@ -267,24 +307,63 @@ async function runJob(jobId: string) {
     });
 
     const label = provider === 'opencode' ? 'OpenCode' : 'Cursor SDK';
+    appendRunnerLog(
+      job.projectId,
+      job.taskId,
+      'system',
+      `${label} 開始執行 @ ${cwd}（Agent：${agentName}）`,
+    );
     if (job.autoRunId) {
       appendRunMessage(job.autoRunId, 'system', `${label} 開始執行 ${job.taskId} @ ${cwd}`);
     }
 
-    const outcome =
+    let outcome =
       provider === 'opencode'
         ? await runOpenCodePrompt({
             prompt,
             cwd,
             taskId: job.taskId,
             signal: controller.signal,
+            onLog,
           })
         : await runCursorSdkPrompt({
             prompt,
             cwd,
             name: `pm-ai-${job.taskId}`,
             signal: controller.signal,
+            onLog,
           });
+
+    for (let attempt = 1; attempt < RUNNER_PROMPT_MAX_ATTEMPTS; attempt++) {
+      if (outcome.ok || outcome.status === 'cancelled' || controller.signal.aborted) break;
+      const retryable = isRetryableConnectionError(outcome.error ?? outcome.status);
+      if (!retryable) break;
+      if (job.autoRunId) {
+        appendRunMessage(
+          job.autoRunId,
+          'system',
+          `Runner 連線失敗（${outcome.error ?? outcome.status}），${attempt + 1}/${RUNNER_PROMPT_MAX_ATTEMPTS} 次重試…`,
+        );
+      }
+      await sleep(400 * attempt);
+      if (controller.signal.aborted) break;
+      outcome =
+        provider === 'opencode'
+          ? await runOpenCodePrompt({
+              prompt,
+              cwd,
+              taskId: job.taskId,
+              signal: controller.signal,
+              onLog,
+            })
+          : await runCursorSdkPrompt({
+              prompt,
+              cwd,
+              name: `pm-ai-${job.taskId}`,
+              signal: controller.signal,
+              onLog,
+            });
+    }
 
     job = touch(job, { sdkRunId: outcome.runId ?? null });
 
@@ -294,6 +373,7 @@ async function runJob(jobId: string) {
 
     if (outcome.ok) {
       const summary = (outcome.resultText ?? `${label} 執行完成`).slice(0, 4000);
+      appendRunnerLog(job.projectId, job.taskId, 'system', `✓ 任務完成（${outcome.durationMs ?? 0}ms）`);
       completeTask(job.projectId, job.taskId, agentName, leaseToken, summary, [
         `${provider}_run:${outcome.runId ?? 'ok'}`,
       ]);
@@ -305,7 +385,9 @@ async function runJob(jobId: string) {
       if (job.autoRunId) {
         appendRunMessage(job.autoRunId, 'assistant', `任務 ${job.taskId} 已由 ${label} 完成。`);
       }
+      notifyRunnerTaskEvent(job.projectId, job.taskId, 'runner_completed');
     } else if (outcome.status === 'cancelled' || controller.signal.aborted) {
+      appendRunnerLog(job.projectId, job.taskId, 'system', 'Runner 已取消');
       try {
         releaseTask(job.projectId, job.taskId, agentName, leaseToken, 'Runner 已取消');
       } catch {
@@ -314,6 +396,12 @@ async function runJob(jobId: string) {
       leaseToken = null;
       touch(job, { status: 'cancelled', error: outcome.error ?? '已取消' });
     } else {
+      appendRunnerLog(
+        job.projectId,
+        job.taskId,
+        'error',
+        `Runner 失敗：${outcome.error ?? outcome.status}`,
+      );
       try {
         progressTask(
           job.projectId,
@@ -344,9 +432,11 @@ async function runJob(jobId: string) {
           `任務 ${job.taskId} Runner 失敗：${outcome.error ?? outcome.status}`,
         );
       }
+      notifyRunnerTaskEvent(job.projectId, job.taskId, 'runner_failed');
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    appendRunnerLog(job.projectId, job.taskId, 'error', `Runner 異常：${message}`);
     if (leaseToken) {
       try {
         releaseTask(job.projectId, job.taskId, agentName, leaseToken, message);
@@ -358,6 +448,7 @@ async function runJob(jobId: string) {
     if (job.autoRunId) {
       appendRunMessage(job.autoRunId, 'system', `任務 ${job.taskId} Runner 異常：${message}`);
     }
+    notifyRunnerTaskEvent(job.projectId, job.taskId, 'runner_failed');
   } finally {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     controllers.delete(jobId);

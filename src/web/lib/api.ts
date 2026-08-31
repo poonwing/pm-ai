@@ -477,7 +477,117 @@ export const tasksApi = {
     api<FileDiffResponse>(
       `/tasks/${taskId}/changes/diff?project_id=${projectId}&path=${encodeURIComponent(path)}`,
     ),
+  getRunnerLogs: (projectId: string, taskId: string, sinceSeq = 0) =>
+    api<RunnerLogsResponse>(
+      `/tasks/${taskId}/runner/logs?project_id=${projectId}&since_seq=${sinceSeq}`,
+    ),
+  streamRunnerLogs: (
+    projectId: string,
+    taskId: string,
+    handlers: {
+      onInit?: (data: RunnerLogsResponse) => void;
+      onLog?: (entry: RunnerLogEntry) => void;
+      onDone?: (data: { job: RunnerJobInfo | null; latestSeq: number }) => void;
+      onError?: (error: Error) => void;
+    },
+    options?: { sinceSeq?: number; signal?: AbortSignal },
+  ) => streamRunnerLogsImpl(projectId, taskId, handlers, options),
 };
+
+export interface RunnerLogEntry {
+  seq: number;
+  at: string;
+  kind: 'system' | 'assistant' | 'tool' | 'thinking' | 'error';
+  text: string;
+}
+
+export interface RunnerJobInfo {
+  id: string;
+  taskId: string;
+  status: string;
+  agentName: string;
+  provider?: string;
+  error?: string | null;
+  resultSummary?: string | null;
+  updatedAt: string;
+}
+
+export interface RunnerLogsResponse {
+  entries: RunnerLogEntry[];
+  latestSeq: number;
+  job: RunnerJobInfo | null;
+}
+
+async function streamRunnerLogsImpl(
+  projectId: string,
+  taskId: string,
+  handlers: {
+    onInit?: (data: RunnerLogsResponse) => void;
+    onLog?: (entry: RunnerLogEntry) => void;
+    onDone?: (data: { job: RunnerJobInfo | null; latestSeq: number }) => void;
+    onError?: (error: Error) => void;
+  },
+  options?: { sinceSeq?: number; signal?: AbortSignal },
+) {
+  const token = await fetchToken();
+  const sinceSeq = options?.sinceSeq ?? 0;
+  const params = new URLSearchParams({
+    project_id: projectId,
+    since_seq: String(sinceSeq),
+  });
+
+  try {
+    const res = await fetch(`/api/v1/tasks/${taskId}/runner/stream?${params.toString()}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'X-PM-AI-Actor': 'human',
+        Accept: 'text/event-stream',
+      },
+      signal: options?.signal,
+    });
+
+    if (!res.ok) {
+      const err = (await res.json().catch(() => ({ error: res.statusText }))) as { error?: string };
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error('無法讀取 streaming 回應');
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    const dispatch = (block: string) => {
+      const lines = block.split('\n');
+      let event = 'message';
+      let data = '';
+      for (const line of lines) {
+        if (line.startsWith('event:')) event = line.slice(6).trim();
+        else if (line.startsWith('data:')) data += line.slice(5).trim();
+      }
+      if (!data) return;
+      const parsed = JSON.parse(data) as unknown;
+      if (event === 'init') handlers.onInit?.(parsed as RunnerLogsResponse);
+      else if (event === 'log') handlers.onLog?.(parsed as RunnerLogEntry);
+      else if (event === 'done') handlers.onDone?.(parsed as { job: RunnerJobInfo | null; latestSeq: number });
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() ?? '';
+      for (const part of parts) {
+        if (part.trim()) dispatch(part);
+      }
+    }
+    if (buffer.trim()) dispatch(buffer);
+  } catch (err) {
+    if (options?.signal?.aborted) return;
+    handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
+  }
+}
 
 export const configApi = {
   get: () => api<AppConfig>('/config'),
