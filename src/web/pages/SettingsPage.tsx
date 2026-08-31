@@ -165,7 +165,8 @@ export function ProjectSettingsPage() {
         <p className="text-xs text-muted-foreground">
           任務詳情可一鍵在 worktree（或主 workspace）啟動開發服務。每個任務分配獨立端口（從 7500 起）。
           命令支援 <code className="font-mono">{'{port}'}</code> 占位符；也會注入環境變數{' '}
-          <code className="font-mono">PORT</code>、<code className="font-mono">HOST=127.0.0.1</code>。
+          <code className="font-mono">PORT</code>、<code className="font-mono">HOST</code>（LAN 模式為{' '}
+          <code className="font-mono">0.0.0.0</code>，預設為 <code className="font-mono">127.0.0.1</code>）。
         </p>
         <div>
           <Label htmlFor="preview-workdir">工作子目錄（可選）</Label>
@@ -190,7 +191,7 @@ export function ProjectSettingsPage() {
             placeholder="npm run dev"
           />
           <p className="text-xs text-muted-foreground mt-1">
-            Vite 等框架若不吃 PORT，可改為：npm run dev -- --port {'{port}'} --host 127.0.0.1
+            Vite 等框架若不吃 PORT，可改為：npm run dev -- --port {'{port}'} --host 0.0.0.0
           </p>
         </div>
         <div>
@@ -372,9 +373,13 @@ export function ProjectSettingsPage() {
 }
 
 export function SettingsPage() {
-  const [config, setConfig] = useState<{ baseUrl: string; port: number; token: string } | null>(
-    null,
-  );
+  const [config, setConfig] = useState<{
+    baseUrl: string;
+    port: number;
+    token: string;
+    lanMode?: boolean;
+    lanUrls?: string[];
+  } | null>(null);
   const [message, setMessage] = useState('');
   const [copied, setCopied] = useState(false);
 
@@ -406,6 +411,16 @@ export function SettingsPage() {
             <div>
               <Label>API 位址</Label>
               <p className="text-sm font-mono mt-1">{config.baseUrl}</p>
+              {config.lanUrls && config.lanUrls.length > 0 && (
+                <div className="mt-2 flex flex-col gap-1">
+                  <p className="text-xs text-muted-foreground">局域網訪問</p>
+                  {config.lanUrls.map((url) => (
+                    <p key={url} className="text-sm font-mono">
+                      {url}
+                    </p>
+                  ))}
+                </div>
+              )}
             </div>
             <div>
               <Label>API Token（給 Agent 用）</Label>

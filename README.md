@@ -18,6 +18,18 @@ npm run dev
 - API：http://127.0.0.1:7432/api/v1
 - Token：`%APPDATA%/pm-ai/config.json`
 
+### 局域網訪問（可選）
+
+預設僅本機可訪問。若需同一 WiFi / 局域網內其他設備（手機、平板）訪問，在 `.env` 加入：
+
+```bash
+HOST=0.0.0.0
+```
+
+重啟後控制台會列出局域網 URL（例如 `http://192.168.x.x:7432`）。Windows 若無法連入，請在「Windows 防火牆」中允許 Node.js 或端口 7432。
+
+> **安全提示**：LAN 模式下，同一網段內的設備可打開 UI 並自動取得 API Token。請只在可信網路環境使用。
+
 ## 開發
 
 ```bash

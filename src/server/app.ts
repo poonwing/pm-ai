@@ -9,6 +9,13 @@ import fs from 'fs';
 import { exec } from 'child_process';
 import { z } from 'zod';
 import { getConfig, regenerateToken } from './config.js';
+import {
+  BIND_HOST,
+  buildAccessUrls,
+  isAllowedCorsOrigin,
+  isAllowedRequestHost,
+  isLanMode,
+} from './network.js';
 import { pickFolder } from './services/pick-folder.js';
 import {
   CreateProjectSchema,
@@ -79,7 +86,19 @@ const app = new Hono<{ Variables: Variables }>();
 app.use(
   '*',
   cors({
-    origin: ['http://127.0.0.1:7432', 'http://localhost:7432', 'http://127.0.0.1:5173', 'http://localhost:5173'],
+    origin: (origin) => {
+      if (!origin) return isLanMode() ? '*' : 'http://127.0.0.1:7432';
+      const config = getConfig();
+      if (isAllowedCorsOrigin(origin, config.port)) return origin;
+      const localhostOrigins = [
+        `http://127.0.0.1:${PORT}`,
+        `http://localhost:${PORT}`,
+        'http://127.0.0.1:5173',
+        'http://localhost:5173',
+      ];
+      if (localhostOrigins.includes(origin)) return origin;
+      return null;
+    },
     allowHeaders: ['Authorization', 'Content-Type', 'X-PM-AI-Actor'],
     allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   }),
@@ -155,7 +174,7 @@ function errorResponse(c: Context, err: unknown) {
 function authMiddleware(actor: 'human' | 'agent' | 'orchestrator' | 'any' | 'human_or_orchestrator') {
   return async (c: Context<{ Variables: Variables }>, next: Next) => {
     const host = c.req.header('host') ?? '';
-    if (!host.startsWith('127.0.0.1') && !host.startsWith('localhost')) {
+    if (!isAllowedRequestHost(host)) {
       return c.json({ error: 'Forbidden host', code: 'FORBIDDEN' }, 403);
     }
 
@@ -226,14 +245,21 @@ app.get('/api/v1/openapi.json', (c) => {
   });
 });
 
-// Bootstrap config (localhost only, no auth - UI needs token on first load)
+// Bootstrap config (private network only, no auth - UI needs token on first load)
 app.get('/api/v1/config', (c) => {
   const host = c.req.header('host') ?? '';
-  if (!host.startsWith('127.0.0.1') && !host.startsWith('localhost')) {
+  if (!isAllowedRequestHost(host)) {
     return c.json({ error: 'Forbidden', code: 'FORBIDDEN' }, 403);
   }
   const config = getConfig();
-  return c.json({ baseUrl: config.baseUrl, port: config.port, token: config.token });
+  const urls = buildAccessUrls(config.port);
+  return c.json({
+    baseUrl: config.baseUrl,
+    port: config.port,
+    token: config.token,
+    lanMode: isLanMode(),
+    lanUrls: urls.lan,
+  });
 });
 
 app.post('/api/v1/config/regenerate-token', authMiddleware('human'), (c) => {
@@ -1292,7 +1318,13 @@ app.get('*', async (c, next) => {
 
 export function startServer() {
   const config = getConfig();
-  console.log(`PM-AI 啟動於 ${config.baseUrl}`);
+  const urls = buildAccessUrls(config.port);
+  console.log(`PM-AI 啟動於 ${urls.local}`);
+  if (urls.lan.length) {
+    console.log('局域網訪問：');
+    for (const url of urls.lan) console.log(`  ${url}`);
+    console.warn('[pm-ai] LAN 模式：同一網段內的設備可訪問 UI 並取得 API Token，請確保網路環境可信');
+  }
   console.log(`Token 儲存於 %APPDATA%/pm-ai/config.json`);
 
   const shutdown = () => {
@@ -1303,12 +1335,12 @@ export function startServer() {
 
   serve({
     fetch: app.fetch,
-    hostname: '127.0.0.1',
+    hostname: BIND_HOST,
     port: config.port,
   });
 
   if (process.platform === 'win32') {
-    exec(`start ${config.baseUrl}`);
+    exec(`start ${urls.local}`);
   }
 }
 

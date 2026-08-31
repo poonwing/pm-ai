@@ -15,6 +15,7 @@ import {
 } from '../../shared/schemas.js';
 import { readProjectConfig } from './files.js';
 import { getExecutionPath } from './git.js';
+import { getPreviewBindHost, getPublicHostForUrls } from '../network.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -38,7 +39,7 @@ function now(): string {
 }
 
 function previewUrl(port: number): string {
-  return `http://127.0.0.1:${port}`;
+  return `http://${getPublicHostForUrls(port)}:${port}`;
 }
 
 function parseTaskSeq(taskId: string): number {
@@ -82,7 +83,7 @@ function isPortFree(port: number): Promise<boolean> {
     server.once('listening', () => {
       server.close(() => resolve(true));
     });
-    server.listen(port, '127.0.0.1');
+    server.listen(port, getPreviewBindHost());
   });
 }
 
@@ -102,12 +103,13 @@ function substituteCommand(command: string, port: number): string {
 }
 
 function buildEnv(port: number): NodeJS.ProcessEnv {
+  const host = getPreviewBindHost();
   return {
     ...process.env,
     PORT: String(port),
     PM_AI_PORT: String(port),
-    HOST: '127.0.0.1',
-    PM_AI_HOST: '127.0.0.1',
+    HOST: host,
+    PM_AI_HOST: host,
   };
 }
 

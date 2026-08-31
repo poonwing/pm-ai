@@ -257,6 +257,8 @@ export interface AppConfig {
   baseUrl: string;
   port: number;
   token: string;
+  lanMode?: boolean;
+  lanUrls?: string[];
 }
 
 export interface WorkspaceGitBranch {
