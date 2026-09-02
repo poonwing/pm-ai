@@ -33,6 +33,7 @@ import {
   LEASE_DURATION_MS,
   isPendingReview,
   IsolationStatus,
+  normalizeReviewerType,
   type TaskGitStatus,
 } from '../../shared/schemas.js';
 import type { z } from 'zod';
@@ -706,7 +707,7 @@ export function createTask(
       queue_order: input.queue_order ?? null,
       review: {
         required: input.review?.required ?? true,
-        reviewer_type: input.review?.reviewer_type ?? 'human',
+        reviewer_type: normalizeReviewerType(input.review?.reviewer_type ?? 'human'),
         reviewer_agent_id: input.review?.reviewer_agent_id ?? null,
         status: input.review?.status ?? 'none',
         note: input.review?.note ?? '',

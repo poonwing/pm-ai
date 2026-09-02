@@ -22,6 +22,7 @@
     "@hono/zod-validator": "^0.4.2",
     "@langchain/core": "^1.2.9",
     "@langchain/langgraph": "^1.4.12",
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.4",
     "@langchain/openai": "^1.5.10",
     "@opencode-ai/sdk": "^1.18.21",
     "dotenv": "^17.4.2",

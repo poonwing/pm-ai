@@ -68,6 +68,18 @@ export const CUSTOM_DECISION_OPTION_ID = 'custom';
 export const REVIEWER_TYPES = ['human', 'agent', 'orchestrator', 'none'] as const;
 export type ReviewerType = (typeof REVIEWER_TYPES)[number];
 
+/** Coerce LLM / legacy values (e.g. staff role "reviewer") to a valid reviewer_type. */
+export function normalizeReviewerType(
+  value: unknown,
+  fallback: ReviewerType = 'human',
+): ReviewerType {
+  if (value == null || value === '') return fallback;
+  const s = String(value).trim().toLowerCase();
+  if ((REVIEWER_TYPES as readonly string[]).includes(s)) return s as ReviewerType;
+  if (s === 'reviewer' || s === 'ai' || s === 'staff') return 'agent';
+  return fallback;
+}
+
 export const TASK_REVIEW_STATUSES = [
   'none',
   'pending',
@@ -78,7 +90,9 @@ export type TaskReviewStatus = (typeof TASK_REVIEW_STATUSES)[number];
 
 export const TaskReviewSchema = z.object({
   required: z.boolean().default(true),
-  reviewer_type: z.enum(REVIEWER_TYPES).default('human'),
+  reviewer_type: z
+    .preprocess((v) => normalizeReviewerType(v), z.enum(REVIEWER_TYPES))
+    .default('human'),
   reviewer_agent_id: z.string().nullable().optional().default(null),
   status: z.enum(TASK_REVIEW_STATUSES).default('none'),
   note: z.string().default(''),

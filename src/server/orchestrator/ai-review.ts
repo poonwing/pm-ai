@@ -250,7 +250,7 @@ async function runOneAiReview(projectId: string, runId: string, taskId: string) 
 
     reviewCooldownUntil.delete(taskId);
     void import('./index.js')
-      .then((m) => m.tickOrchestrator(runId))
+      .then((m) => m.resumeOrchestrator(runId))
       .catch(() => undefined);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
