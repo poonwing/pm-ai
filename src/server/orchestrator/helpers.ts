@@ -148,6 +148,19 @@ export function isRetryRunnerRequest(message: string): boolean {
   return /重試|重试|再試|再试|重新執行|重新执行|重新跑|再跑一遍/.test(t);
 }
 
+/** User asks how many agents are working / current progress (not a replan instruction). */
+export function isStatusInquiry(message: string): boolean {
+  const t = message.trim();
+  if (/^\/(status|progress|stats)\b/i.test(t)) return true;
+  if (/^(進度|进度)如何|怎么样了|怎樣了|什么进度|什麼進度/.test(t)) return true;
+  const asksWhen = /多少|幾個|几个|幾多|几多|有多少|目前|現在|现在|还在|還在/.test(t);
+  const asksWhat =
+    /agent|員工|员工|人|工作|在跑|在幹|在干|執行|执行|進度|进度|狀態|状态|runner|任務|任务/.test(
+      t,
+    );
+  return asksWhen && asksWhat;
+}
+
 export function runnerRetryCountsFromCheckpoint(
   checkpoint: Record<string, unknown> | undefined | null,
 ): Record<string, number> {

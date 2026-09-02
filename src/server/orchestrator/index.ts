@@ -35,9 +35,11 @@ import {
   isResearchPhase,
   isRetryRunnerRequest,
   isStartWorkRequest,
+  isStatusInquiry,
   isWaitingPhase,
   markClarifiedAndContinue,
   tryParseDecisionReply,
+  collectRunTaskIds,
   type OrchestratorPlan,
 } from './helpers.js';
 import { reconcileRunnerFailures } from './nodes/reconcile-runner.js';
@@ -85,6 +87,52 @@ function optsToCommand(opts: TickOptions): PendingCommand | undefined {
   if (opts.forceReplan) return { type: 'force_replan' };
   if (opts.skipClarify) return { type: 'skip_clarify' };
   return { type: 'tick' };
+}
+
+function buildRunStatusSummary(projectId: string, runId: string): string {
+  const run = getAutoRun(runId);
+  const runTaskIds = new Set(collectRunTaskIds(run));
+  const tasks = listProjectTasks(projectId).filter((t) => runTaskIds.has(t.id));
+  const jobs = getRunnerStatus(projectId).jobs.filter(
+    (j) =>
+      j.kind !== 'studio' &&
+      (j.autoRunId === runId || (runTaskIds.has(j.taskId) && !j.autoRunId)),
+  );
+  const activeJobs = jobs.filter((j) =>
+    ['queued', 'claiming', 'running'].includes(j.status),
+  );
+  const runningJobs = jobs.filter((j) => j.status === 'running');
+  const inProgress = tasks.filter((t) => t.status === 'in_progress');
+  const todo = tasks.filter((t) => t.status === 'todo');
+  const done = tasks.filter((t) => t.status === 'done');
+
+  const agentNames = new Set<string>();
+  for (const j of runningJobs) {
+    if (j.agentName) agentNames.add(j.agentName);
+  }
+  for (const t of inProgress) {
+    const name = (t as { assignee_name?: string }).assignee_name;
+    if (name) agentNames.add(name);
+  }
+
+  const lines = [
+    `目前 ${runningJobs.length} 個 Runner 任務正在執行（含排隊/啟動共 ${activeJobs.length} 個）。`,
+    `約 ${agentNames.size} 位 agent 參與中${agentNames.size ? `：${[...agentNames].join('、')}` : ''}。`,
+    `本 Run 任務：完成 ${done.length}，進行中 ${inProgress.length}，待開始 ${todo.length}。`,
+  ];
+  if (activeJobs.length) {
+    lines.push(
+      `Runner：${activeJobs
+        .map((j) => `${j.taskId}（${j.status} · ${j.agentName}）`)
+        .join('；')}`,
+    );
+  } else if (!todo.length && !inProgress.length && done.length) {
+    lines.push('目前沒有進行中的 Runner；可點「推進一步」查看彙總。');
+  } else if (todo.length && !activeJobs.length) {
+    lines.push(`有 ${todo.length} 個任務待 Runner 領取；若長時間無動靜可回覆「重試」。`);
+  }
+  lines.push('若要完整彙總請點「推進一步」；若要依新指示重規劃請回覆「重新規劃」。');
+  return lines.join('\n');
 }
 
 function buildGraphInvokeCommand(input: {
@@ -280,6 +328,9 @@ export async function messageOrchestrator(runId: string, message: string) {
         'assistant',
         '已記下。研究員完成後將跳過澄清，直接進入審查協定與規劃。',
       );
+    } else if (isStatusInquiry(message)) {
+      appendRunMessage(runId, 'assistant', buildRunStatusSummary(latest.project_id, runId));
+      return runResult(runId);
     } else {
       appendRunMessage(
         runId,
@@ -341,6 +392,10 @@ export async function messageOrchestrator(runId: string, message: string) {
     if (isExplicitReplanRequest(message)) {
       appendRunMessage(runId, 'assistant', '收到，將依你的補充重新規劃與分派…');
       return tickOrchestrator(runId, { forceReplan: true });
+    }
+    if (isStatusInquiry(message)) {
+      appendRunMessage(runId, 'assistant', buildRunStatusSummary(latest.project_id, runId));
+      return runResult(runId);
     }
     appendRunMessage(
       runId,
