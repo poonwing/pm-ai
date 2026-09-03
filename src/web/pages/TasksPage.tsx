@@ -2,8 +2,17 @@ import { useEffect, useState, useCallback } from 'react';
 import { Link, useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { tasksApi, projectsApi, Task, Project } from '../lib/api';
 import { Button, Badge, Input, Textarea, Label, Dialog } from '../components/ui';
-import { formatRelativeTime, statusLabel, statusColor, statusDotColor } from '../lib/utils';
-import { TASK_STATUSES, TaskStatus } from '@shared/schemas';
+import {
+  formatRelativeTime,
+  statusLabel,
+  statusColor,
+  statusDotColor,
+  BOARD_COLUMNS,
+  BOARD_COLUMN_LABELS,
+  isTaskPendingReview,
+  boardColumnForTask,
+  BoardColumnId,
+} from '../lib/utils';
 
 type ViewMode = 'board' | 'list';
 
@@ -25,6 +34,7 @@ export function TasksPage() {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<'all' | 'needs_attention'>('all');
   const [showCancelled, setShowCancelled] = useState(false);
+  const [showDone, setShowDone] = useState(false);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [createForm, setCreateForm] = useState(emptyCreateForm);
   const [creating, setCreating] = useState(false);
@@ -104,17 +114,15 @@ export function TasksPage() {
     if (!showCancelled && t.status === 'cancelled') return false;
     if (search && !t.title.toLowerCase().includes(search.toLowerCase())) return false;
     if (filter === 'needs_attention') {
-      return (
-        t.status === 'draft' ||
-        (t.status === 'done' && !t.humanReviewed)
-      );
+      return t.status === 'draft' || isTaskPendingReview(t);
     }
     return true;
   });
 
-  const columns: TaskStatus[] = showCancelled
-    ? [...TASK_STATUSES]
-    : TASK_STATUSES.filter((s) => s !== 'cancelled');
+  const columns: BoardColumnId[] = [
+    ...BOARD_COLUMNS.filter((c) => c !== 'done' || showDone),
+    ...(showCancelled ? (['cancelled'] as const) : []),
+  ];
 
   return (
     <div className="flex flex-col gap-4 h-full">
@@ -156,14 +164,30 @@ export function TasksPage() {
 
       {view === 'board' ? (
         <div className="flex gap-3 overflow-x-auto pb-4 flex-1">
-          {columns.map((status) => {
-            const colTasks = filtered.filter((t) => t.status === status);
+          {columns.map((column) => {
+            const colTasks = filtered.filter((t) => boardColumnForTask(t) === column);
+            const label = BOARD_COLUMN_LABELS[column];
             return (
-              <div key={status} className="flex-shrink-0 w-56 flex flex-col gap-2">
-                <div className="flex items-center justify-between px-1">
-                  <span className="text-xs font-medium text-muted-foreground">
-                    {statusLabel(status)} ({colTasks.length})
+              <div key={column} className="flex-shrink-0 w-56 flex flex-col gap-2">
+                <div className="flex items-center justify-between px-1 gap-2">
+                  <span
+                    className={`text-xs font-medium ${
+                      column === 'pending_review' ? 'text-amber-700' : 'text-muted-foreground'
+                    }`}
+                  >
+                    {label} ({colTasks.length})
                   </span>
+                  {(column === 'done' || column === 'cancelled') && (
+                    <button
+                      type="button"
+                      className="text-xs text-muted-foreground hover:underline shrink-0"
+                      onClick={() =>
+                        column === 'done' ? setShowDone(false) : setShowCancelled(false)
+                      }
+                    >
+                      隱藏
+                    </button>
+                  )}
                 </div>
                 <div className="flex flex-col gap-2 min-h-[100px]">
                   {colTasks.map((task) => (
@@ -175,21 +199,31 @@ export function TasksPage() {
                   ))}
                   {colTasks.length === 0 && (
                     <div className="text-xs text-muted-foreground text-center py-4">
-                      沒有{statusLabel(status)}任務
+                      沒有{label}任務
                     </div>
                   )}
                 </div>
               </div>
             );
           })}
-          {!showCancelled && (
-            <button
-              className="text-xs text-muted-foreground self-start mt-6 hover:underline"
-              onClick={() => setShowCancelled(true)}
-            >
-              顯示已取消
-            </button>
-          )}
+          <div className="flex flex-col gap-2 self-start mt-6 shrink-0">
+            {!showDone && (
+              <button
+                className="text-xs text-muted-foreground hover:underline text-left"
+                onClick={() => setShowDone(true)}
+              >
+                顯示已完成
+              </button>
+            )}
+            {!showCancelled && (
+              <button
+                className="text-xs text-muted-foreground hover:underline text-left"
+                onClick={() => setShowCancelled(true)}
+              >
+                顯示已取消
+              </button>
+            )}
+          </div>
         </div>
       ) : (
         <div className="overflow-auto">
@@ -213,8 +247,8 @@ export function TasksPage() {
                 >
                   <td className="py-2 pr-4">
                     <Badge className={statusColor(task.status, task.humanReviewed)}>
-                      {task.status === 'done' && !task.humanReviewed
-                        ? '待你驗收'
+                      {isTaskPendingReview(task)
+                        ? '待審批'
                         : statusLabel(task.status)}
                     </Badge>
                   </td>
@@ -352,10 +386,9 @@ function reviewBadge(task: Task): string | null {
 }
 
 function TaskCard({ task, projectId }: { task: Task; projectId: string }) {
-  const label =
-    task.status === 'done' && !task.humanReviewed && (!task.review || task.review.reviewer_type === 'human')
-      ? '待你驗收'
-      : statusLabel(task.status);
+  const label = isTaskPendingReview(task)
+    ? BOARD_COLUMN_LABELS.pending_review
+    : statusLabel(task.status);
   const rev = reviewBadge(task);
 
   return (

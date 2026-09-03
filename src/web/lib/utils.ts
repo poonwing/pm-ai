@@ -1,5 +1,57 @@
 import { STATUS_LABELS, TaskStatus } from '@shared/schemas';
 
+export type BoardColumnId = TaskStatus | 'pending_review';
+
+export const BOARD_COLUMN_LABELS: Record<BoardColumnId, string> = {
+  draft: STATUS_LABELS.draft,
+  todo: STATUS_LABELS.todo,
+  in_progress: STATUS_LABELS.in_progress,
+  pending_review: '待審批',
+  done: STATUS_LABELS.done,
+  cancelled: STATUS_LABELS.cancelled,
+};
+
+/** 看板欄位：處理中之後先待審批，通過才進完成。 */
+export const BOARD_COLUMNS: BoardColumnId[] = [
+  'draft',
+  'todo',
+  'in_progress',
+  'pending_review',
+  'done',
+];
+
+export function isTaskPendingReview(task: {
+  status: TaskStatus;
+  humanReviewed: boolean;
+  review?: {
+    required: boolean;
+    reviewer_type: string;
+    status: string;
+  } | null;
+}): boolean {
+  if (task.status !== 'done') return false;
+  const review = task.review;
+  if (review?.required === false || review?.reviewer_type === 'none') return false;
+  if (review?.status === 'approved') return false;
+  if (!review || review.reviewer_type === 'human') {
+    return !task.humanReviewed;
+  }
+  return review.status === 'pending' || review.status === 'none';
+}
+
+export function boardColumnForTask(task: {
+  status: TaskStatus;
+  humanReviewed: boolean;
+  review?: {
+    required: boolean;
+    reviewer_type: string;
+    status: string;
+  } | null;
+}): BoardColumnId {
+  if (isTaskPendingReview(task)) return 'pending_review';
+  return task.status;
+}
+
 export function cn(...classes: (string | boolean | undefined | null)[]) {
   return classes.filter(Boolean).join(' ');
 }
