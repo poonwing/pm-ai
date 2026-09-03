@@ -64,8 +64,20 @@ function isTimeoutError(err: unknown): boolean {
   return codes.includes('APITimeoutError') || /timed? ?out/i.test(msg);
 }
 
+/** 智譜 API 業務碼 1234：服務端「網絡錯誤 / 請稍後重試」，屬可重試。 */
+export function isZhipuTransientNetworkError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  const codes = collectErrorCodes(err);
+  return (
+    codes.includes('1234') ||
+    /网络错误.*错误\s*id|網路錯誤.*錯誤\s*id|错误id\s*\w+|錯誤id\s*\w+/i.test(msg) ||
+    /请稍后重试|請稍後重試/i.test(msg)
+  );
+}
+
 export function isRetryableConnectionError(err: unknown): boolean {
   if (isTimeoutError(err)) return false;
+  if (isZhipuTransientNetworkError(err)) return true;
   const codes = collectErrorCodes(err);
   const msg = err instanceof Error ? err.message : String(err);
   return (
@@ -88,6 +100,11 @@ function formatModelError(err: unknown): Error {
   if (code === '1113' || msg.includes('余额不足')) {
     return new ValidationError(
       `GLM 1113 余额不足或无可用资源包。若你用的是 Coding Plan：请确认 .env 中 ZAI_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4 且 ZAI_MODEL 为 glm-4.7/glm-5.3 等套餐模型；通用 /api/paas/v4 不会走 Coding 额度。也可到智谱控制台检查套餐用量或账户余额。原始信息：${msg}`,
+    );
+  }
+  if (isZhipuTransientNetworkError(err)) {
+    return new ValidationError(
+      `智譜 API 暫態網絡錯誤（錯誤碼 1234），請稍後再試。若持續出現，可換模型（如 glm-5-turbo）或把 ZAI_BASE_URL 改為 https://api.z.ai/api/coding/paas/v4。原始信息：${msg}`,
     );
   }
   if (isTimeoutError(err)) {

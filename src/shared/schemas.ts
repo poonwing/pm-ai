@@ -27,6 +27,9 @@ export type ActorType = (typeof ACTOR_TYPES)[number];
 export const RUN_MODES = ['manual', 'auto'] as const;
 export type RunMode = (typeof RUN_MODES)[number];
 
+export const RUNNER_PROVIDERS = ['cursor', 'opencode'] as const;
+export type RunnerProviderSetting = (typeof RUNNER_PROVIDERS)[number];
+
 export const AGENT_ROLES = [
   'orchestrator',
   'researcher',
@@ -188,6 +191,8 @@ export const ProjectConfigSchema = z.object({
   preview_install_if_needed: z.boolean().default(true),
   preview_workdir: z.string().default(''),
   run_mode: z.enum(RUN_MODES).default('manual'),
+  /** 未設定時沿用進程環境變數 RUNNER_PROVIDER */
+  runner_provider: z.enum(RUNNER_PROVIDERS).optional(),
 });
 
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
@@ -207,6 +212,7 @@ export const UpdateProjectSchema = z.object({
   preview_install_if_needed: z.boolean().optional(),
   preview_workdir: z.string().optional(),
   run_mode: z.enum(RUN_MODES).optional(),
+  runner_provider: z.enum(RUNNER_PROVIDERS).optional(),
 });
 
 export const RelocateProjectSchema = z.object({

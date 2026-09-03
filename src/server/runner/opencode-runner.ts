@@ -6,6 +6,7 @@ import { spawn, type ChildProcess } from 'child_process';
 import { createOpencodeClient, type Part } from '@opencode-ai/sdk';
 import { ensureOpenCodeCliOnPath, OPENCODE_CLI_INSTALL_HINT } from './opencode-cli.js';
 import { getOpenCodeRunnerConfig } from './types.js';
+import { isZhipuTransientNetworkError } from '../orchestrator/model.js';
 import type { RunnerLogKind } from './logs.js';
 
 export interface OpenCodeRunOutcome {
@@ -155,14 +156,75 @@ export async function runOpenCodePrompt(input: {
     log('system', `OpenCode session 已建立：${sessionId}`);
 
     log('system', '正在發送任務 prompt…');
-    const prompted = await client.session.prompt({
-      path: { id: sessionId },
-      query: { directory: input.cwd },
-      body: {
-        model: { providerID: cfg.providerId, modelID: cfg.modelId },
-        parts: [{ type: 'text', text: input.prompt }],
-      },
-    });
+    const maxPromptAttempts = Math.max(
+      1,
+      Number(process.env.OPENCODE_PROMPT_MAX_ATTEMPTS ?? '3') || 3,
+    );
+    let prompted: Awaited<ReturnType<typeof client.session.prompt>> | null = null;
+    let lastPromptError = '';
+
+    for (let attempt = 1; attempt <= maxPromptAttempts; attempt++) {
+      if (input.signal?.aborted) break;
+      prompted = await client.session.prompt({
+        path: { id: sessionId },
+        query: { directory: input.cwd },
+        body: {
+          model: { providerID: cfg.providerId, modelID: cfg.modelId },
+          parts: [{ type: 'text', text: input.prompt }],
+        },
+      });
+
+      if (input.signal?.aborted) break;
+
+      const promptErr = (prompted as { error?: { message?: string }; data?: unknown }).error;
+      if (promptErr || !prompted.data) {
+        lastPromptError = promptErr?.message ?? 'OpenCode session.prompt 失败';
+        if (attempt < maxPromptAttempts && isZhipuTransientNetworkError(lastPromptError)) {
+          log(
+            'system',
+            `智譜暫態網絡錯誤，重試 prompt ${attempt + 1}/${maxPromptAttempts}…`,
+          );
+          await new Promise((r) => setTimeout(r, 800 * attempt));
+          continue;
+        }
+        return {
+          ok: false,
+          status: 'error',
+          runId: sessionId,
+          error: lastPromptError,
+          durationMs: Date.now() - started,
+        };
+      }
+
+      const info = prompted.data.info;
+      if (info.error) {
+        const errObj = info.error as {
+          message?: string;
+          name?: string;
+          data?: { message?: string };
+        };
+        lastPromptError =
+          errObj.message || errObj.data?.message || errObj.name || 'OpenCode 执行错误';
+        if (attempt < maxPromptAttempts && isZhipuTransientNetworkError(lastPromptError)) {
+          log(
+            'system',
+            `智譜暫態網絡錯誤（${lastPromptError.slice(0, 80)}），重試 prompt ${attempt + 1}/${maxPromptAttempts}…`,
+          );
+          await new Promise((r) => setTimeout(r, 800 * attempt));
+          continue;
+        }
+        return {
+          ok: false,
+          status: 'error',
+          runId: sessionId,
+          error: lastPromptError,
+          durationMs: Date.now() - started,
+        };
+      }
+
+      lastPromptError = '';
+      break;
+    }
 
     if (input.signal?.aborted) {
       return {
@@ -174,29 +236,12 @@ export async function runOpenCodePrompt(input: {
       };
     }
 
-    if (prompted.error || !prompted.data) {
-      const msg =
-        (prompted.error as { message?: string } | undefined)?.message ??
-        'OpenCode session.prompt 失败';
+    if (!prompted?.data || lastPromptError) {
       return {
         ok: false,
         status: 'error',
         runId: sessionId,
-        error: msg,
-        durationMs: Date.now() - started,
-      };
-    }
-
-    const info = prompted.data.info;
-    if (info.error) {
-      const errObj = info.error as { message?: string; name?: string; data?: { message?: string } };
-      const errMsg =
-        errObj.message || errObj.data?.message || errObj.name || 'OpenCode 执行错误';
-      return {
-        ok: false,
-        status: 'error',
-        runId: sessionId,
-        error: errMsg,
+        error: lastPromptError || 'OpenCode session.prompt 失败',
         durationMs: Date.now() - started,
       };
     }

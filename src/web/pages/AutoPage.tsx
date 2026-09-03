@@ -36,6 +36,8 @@ export function AutoPage() {
   const [runnerCliInstalled, setRunnerCliInstalled] = useState(true);
   const [runnerHint, setRunnerHint] = useState<string | null>(null);
   const [runnerProvider, setRunnerProvider] = useState<'cursor' | 'opencode'>('cursor');
+  const [runnerProviderSource, setRunnerProviderSource] = useState<'project' | 'env'>('env');
+  const [runnerDefaultProvider, setRunnerDefaultProvider] = useState<'cursor' | 'opencode'>('cursor');
   const [goal, setGoal] = useState('');
   const [chat, setChat] = useState('');
   const [decisionNotes, setDecisionNotes] = useState<Record<string, string>>({});
@@ -60,6 +62,8 @@ export function AutoPage() {
       setRunnerCliInstalled(runner.cliInstalled);
       setRunnerHint(runner.hint);
       setRunnerProvider(runner.provider);
+      setRunnerProviderSource(runner.source ?? 'env');
+      setRunnerDefaultProvider(runner.defaultProvider ?? runner.provider);
       setRunnerJobs(runner.jobs);
     }
     const live =
@@ -97,6 +101,8 @@ export function AutoPage() {
           setRunnerCliInstalled(runner.cliInstalled);
           setRunnerHint(runner.hint);
           setRunnerProvider(runner.provider);
+          setRunnerProviderSource(runner.source ?? 'env');
+          setRunnerDefaultProvider(runner.defaultProvider ?? runner.provider);
           setRunnerJobs(runner.jobs);
         })
         .catch(() => undefined);
@@ -182,6 +188,20 @@ export function AutoPage() {
     if (!projectId) return;
     await projectsApi.update(projectId, { run_mode: mode });
     await load();
+  };
+
+  const setRunnerProviderForProject = async (provider: 'cursor' | 'opencode') => {
+    if (!projectId || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await projectsApi.update(projectId, { runner_provider: provider });
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '切換 Runner Provider 失敗');
+    } finally {
+      setBusy(false);
+    }
   };
 
   const REVIEWER_OPTIONS = [
@@ -361,6 +381,9 @@ export function AutoPage() {
           <h2 className="font-medium text-sm">任务执行器（Runner）</h2>
           <div className="flex items-center gap-2">
             <Badge>{runnerProvider}</Badge>
+            <Badge className="bg-zinc-100 text-zinc-700">
+              {runnerProviderSource === 'project' ? '本專案設定' : `沿用 .env（${runnerDefaultProvider}）`}
+            </Badge>
             <Badge className={runnerConfigured ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100'}>
               {runnerConfigured
                 ? runnerProvider === 'opencode'
@@ -377,11 +400,30 @@ export function AutoPage() {
             )}
           </div>
         </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-muted-foreground">Provider：</span>
+          <Button
+            size="sm"
+            variant={runnerProvider === 'opencode' ? 'default' : 'ghost'}
+            disabled={busy}
+            onClick={() => setRunnerProviderForProject('opencode')}
+          >
+            OpenCode（GLM）
+          </Button>
+          <Button
+            size="sm"
+            variant={runnerProvider === 'cursor' ? 'default' : 'ghost'}
+            disabled={busy}
+            onClick={() => setRunnerProviderForProject('cursor')}
+          >
+            Cursor SDK
+          </Button>
+        </div>
         <p className="text-xs text-muted-foreground">
-          在 <code>.env</code> 设置 <code>RUNNER_PROVIDER=cursor</code> 或{' '}
-          <code>opencode</code>。OpenCode 使用官方{' '}
-          <code>@opencode-ai/sdk</code>，复用 GLM 的 <code>ZAI_API_KEY</code>
-          ；本机还需安装 <code>opencode</code> CLI（SDK 会启动 serve）。
+          每個專案可獨立選擇 Runner。設定寫入{' '}
+          <code>.pm-ai/project.yml</code> 的 <code>runner_provider</code>
+          ；未設定時沿用全域 <code>.env</code> 的 <code>RUNNER_PROVIDER</code>
+          。OpenCode 复用 <code>ZAI_API_KEY</code>，本机还需安装 opencode CLI。
         </p>
         {runnerProvider === 'opencode' && !runnerCliInstalled && (
           <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">

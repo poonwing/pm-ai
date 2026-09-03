@@ -356,6 +356,10 @@ function getProjectPreviewFields(workspacePath: string) {
     previewInstallIfNeeded: config?.preview_install_if_needed ?? true,
     previewWorkdir: config?.preview_workdir ?? '',
     runMode: config?.run_mode ?? 'manual',
+    runnerProvider:
+      config?.runner_provider === 'cursor' || config?.runner_provider === 'opencode'
+        ? config.runner_provider
+        : undefined,
   };
 }
 
@@ -443,6 +447,7 @@ export function updateProject(
     preview_install_if_needed?: boolean;
     preview_workdir?: string;
     run_mode?: 'manual' | 'auto';
+    runner_provider?: 'cursor' | 'opencode';
   },
 ) {
   const project = getProject(projectId);
@@ -465,6 +470,9 @@ export function updateProject(
     if (updates.run_mode !== undefined) {
       config.run_mode = updates.run_mode;
     }
+    if (updates.runner_provider !== undefined) {
+      config.runner_provider = updates.runner_provider;
+    }
     if (
       updates.name ||
       updates.description !== undefined ||
@@ -472,7 +480,8 @@ export function updateProject(
       updates.preview_install_command !== undefined ||
       updates.preview_install_if_needed !== undefined ||
       updates.preview_workdir !== undefined ||
-      updates.run_mode !== undefined
+      updates.run_mode !== undefined ||
+      updates.runner_provider !== undefined
     ) {
       writeProjectConfig(project.workspacePath, config);
     }

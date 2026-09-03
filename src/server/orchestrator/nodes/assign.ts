@@ -76,7 +76,7 @@ export async function assignNode(
     state.runId,
     'assistant',
     createdTaskIds.length
-      ? `已建立 ${createdTaskIds.length} 個任務，並提交 Runner（${process.env.RUNNER_PROVIDER ?? 'cursor'}）自動執行。完成後我會彙總；你也可隨時喊停。`
+      ? `已建立 ${createdTaskIds.length} 個任務，並提交 Runner（${(await import('../../runner/index.js')).resolveRunnerProvider(state.projectId)}）自動執行。完成後我會彙總；你也可隨時喊停。`
       : '尚未建立任務。請補充需求或確認有 assignable 員工。',
   );
 

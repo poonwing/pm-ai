@@ -3,12 +3,14 @@ import { getStaffAgent } from '../services/agents.js';
 import {
   claimTask,
   completeTask,
+  getProject,
   getTask,
   heartbeatTask,
   progressTask,
   releaseTask,
 } from '../services/tasks.js';
 import { appendRunMessage } from '../services/auto.js';
+import { readProjectConfig } from '../services/files.js';
 import { runCursorSdkPrompt } from './cursor-sdk-runner.js';
 import { runOpenCodePrompt } from './opencode-runner.js';
 import { isOpenCodeCliInstalled, OPENCODE_CLI_INSTALL_HINT } from './opencode-cli.js';
@@ -16,10 +18,11 @@ import { buildRunnerPrompt } from './prompt.js';
 import { isRetryableConnectionError } from '../orchestrator/model.js';
 import { appendRunnerLog, updateOrAppendRunnerLog } from './logs.js';
 import {
+  getDefaultRunnerProvider,
   getRunnerConcurrency,
-  getRunnerProvider,
   isCursorRunnerConfigured,
   isOpenCodeRunnerConfigured,
+  parseRunnerProvider,
   type RunnerJob,
   type RunnerJobStatus,
   type RunnerProvider,
@@ -94,16 +97,39 @@ function runnerBlockReason(provider: RunnerProvider): string | null {
   return null;
 }
 
+/** 專案 .pm-ai/project.yml 的 runner_provider，未設則回退 .env RUNNER_PROVIDER */
+export function resolveRunnerProvider(projectId: string): RunnerProvider {
+  try {
+    const project = getProject(projectId);
+    const config = readProjectConfig(project.workspacePath);
+    const fromProject = parseRunnerProvider(config?.runner_provider);
+    if (fromProject) return fromProject;
+  } catch {
+    /* fall through */
+  }
+  return getDefaultRunnerProvider();
+}
+
 export function getRunnerStatus(projectId: string) {
-  const provider = getRunnerProvider();
+  const provider = resolveRunnerProvider(projectId);
   const hint = runnerBlockReason(provider);
   return {
     provider,
+    defaultProvider: getDefaultRunnerProvider(),
+    source: (() => {
+      try {
+        const project = getProject(projectId);
+        const config = readProjectConfig(project.workspacePath);
+        return parseRunnerProvider(config?.runner_provider) ? 'project' : 'env';
+      } catch {
+        return 'env' as const;
+      }
+    })(),
     configured: provider === 'opencode' ? isOpenCodeRunnerConfigured() : isCursorRunnerConfigured(),
     cliInstalled: provider !== 'opencode' || isOpenCodeCliInstalled(),
     ready: hint === null,
     hint,
-    concurrency: getRunnerConcurrency(),
+    concurrency: getRunnerConcurrency(provider),
     jobs: listJobsForProject(projectId),
   };
 }
@@ -117,7 +143,7 @@ export function enqueueRunnerJob(input: {
   prompt?: string;
   cwd?: string;
 }): RunnerJob {
-  const provider = getRunnerProvider();
+  const provider = resolveRunnerProvider(input.projectId);
   const kind: RunnerJobKind = input.kind ?? 'task';
   const taskId = input.taskId ?? '';
 
@@ -235,7 +261,7 @@ async function runJob(jobId: string) {
     return;
   }
 
-  const provider = job.provider ?? getRunnerProvider();
+  const provider = job.provider ?? resolveRunnerProvider(job.projectId);
   const controller = new AbortController();
   controllers.set(jobId, controller);
 
@@ -459,7 +485,7 @@ async function runStudioJob(jobId: string) {
   let job = jobs.get(jobId);
   if (!job) return;
 
-  const provider = job.provider ?? getRunnerProvider();
+  const provider = job.provider ?? resolveRunnerProvider(job.projectId);
   const controller = new AbortController();
   controllers.set(jobId, controller);
   const agentName = provider === 'opencode' ? 'opencode' : 'cursor-sdk';

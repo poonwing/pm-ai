@@ -30,9 +30,19 @@ export interface RunnerJob {
   updatedAt: string;
 }
 
-export function getRunnerProvider(): RunnerProvider {
+export function getDefaultRunnerProvider(): RunnerProvider {
   const raw = (process.env.RUNNER_PROVIDER ?? 'cursor').toLowerCase().trim();
   return raw === 'opencode' ? 'opencode' : 'cursor';
+}
+
+/** @deprecated 使用 getDefaultRunnerProvider；專案級請用 resolveRunnerProvider(projectId) */
+export function getRunnerProvider(): RunnerProvider {
+  return getDefaultRunnerProvider();
+}
+
+export function parseRunnerProvider(value: unknown): RunnerProvider | null {
+  if (value === 'cursor' || value === 'opencode') return value;
+  return null;
 }
 
 export function getCursorRunnerConfig() {
@@ -67,12 +77,12 @@ export function isOpenCodeRunnerConfigured(): boolean {
   return Boolean(getOpenCodeRunnerConfig().apiKey);
 }
 
-export function isRunnerConfigured(provider = getRunnerProvider()): boolean {
+export function isRunnerConfigured(provider = getDefaultRunnerProvider()): boolean {
   return provider === 'opencode' ? isOpenCodeRunnerConfigured() : isCursorRunnerConfigured();
 }
 
-export function getRunnerConcurrency(): number {
-  return getRunnerProvider() === 'opencode'
+export function getRunnerConcurrency(provider = getDefaultRunnerProvider()): number {
+  return provider === 'opencode'
     ? getOpenCodeRunnerConfig().concurrency
     : getCursorRunnerConfig().concurrency;
 }

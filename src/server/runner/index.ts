@@ -4,6 +4,7 @@ export {
   getRunnerStatus,
   getRunnerJob,
   getLatestRunnerJobForTask,
+  resolveRunnerProvider,
   type RunnerJob,
   type RunnerJobStatus,
 } from './queue.js';
@@ -21,7 +22,10 @@ export {
   isRunnerConfigured,
   getCursorRunnerConfig,
   getOpenCodeRunnerConfig,
+  getDefaultRunnerProvider,
   getRunnerProvider,
+  getRunnerConcurrency,
+  parseRunnerProvider,
   type RunnerProvider,
   type RunnerJobKind,
   type StudioKind,

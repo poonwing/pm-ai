@@ -77,6 +77,7 @@ export interface Project {
   previewInstallIfNeeded?: boolean;
   previewWorkdir?: string;
   runMode?: 'manual' | 'auto';
+  runnerProvider?: 'cursor' | 'opencode';
 }
 
 export interface PreviewInfo {
@@ -314,6 +315,7 @@ export const projectsApi = {
       preview_install_if_needed?: boolean;
       preview_workdir?: string;
       run_mode?: 'manual' | 'auto';
+      runner_provider?: 'cursor' | 'opencode';
     },
   ) =>
     api<Project>(`/projects/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -752,6 +754,8 @@ export const autoApi = {
   runnerStatus: (projectId: string) =>
     api<{
       provider: 'cursor' | 'opencode';
+      defaultProvider?: 'cursor' | 'opencode';
+      source?: 'project' | 'env';
       configured: boolean;
       cliInstalled: boolean;
       ready: boolean;
