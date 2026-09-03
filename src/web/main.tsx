@@ -13,6 +13,7 @@ import { AutoPage } from './pages/AutoPage';
 import { FilesPage } from './pages/FilesPage';
 import { RequirementsPage } from './pages/RequirementsPage';
 import { DesignsPage } from './pages/DesignsPage';
+import { ChatPage } from './pages/ChatPage';
 import './index.css';
 import 'react-diff-view/style/index.css';
 
@@ -31,6 +32,7 @@ createRoot(document.getElementById('root')!).render(
           <Route path="projects/:projectId/designs" element={<DesignsPage />} />
           <Route path="projects/:projectId/agents" element={<AgentsPage />} />
           <Route path="projects/:projectId/auto" element={<AutoPage />} />
+          <Route path="projects/:projectId/chat" element={<ChatPage />} />
           <Route path="projects/:projectId/settings" element={<ProjectSettingsPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>

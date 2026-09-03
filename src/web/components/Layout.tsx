@@ -163,6 +163,16 @@ export function Layout() {
               AI 員工
             </NavLink>
             <NavLink
+              to={`/projects/${projectId}/chat`}
+              className={({ isActive }) =>
+                `block px-3 py-2 rounded-md text-sm transition-colors ${
+                  isActive ? 'bg-accent font-medium' : 'text-muted-foreground hover:bg-accent/50'
+                }`
+              }
+            >
+              Agent Chat
+            </NavLink>
+            <NavLink
               to={`/projects/${projectId}/auto`}
               className={({ isActive }) =>
                 `block px-3 py-2 rounded-md text-sm transition-colors ${

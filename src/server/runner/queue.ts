@@ -138,6 +138,7 @@ export function enqueueRunnerJob(input: {
   projectId: string;
   taskId?: string;
   autoRunId?: string | null;
+  chatSessionId?: string | null;
   kind?: RunnerJobKind;
   studioKind?: StudioKind;
   prompt?: string;
@@ -153,6 +154,7 @@ export function enqueueRunnerJob(input: {
         j.projectId === input.projectId &&
         j.taskId === taskId &&
         j.kind !== 'studio' &&
+        j.kind !== 'chat' &&
         (j.status === 'queued' || j.status === 'claiming' || j.status === 'running'),
     );
     if (existing) return existing;
@@ -169,6 +171,17 @@ export function enqueueRunnerJob(input: {
     if (existing) return existing;
   }
 
+  if (kind === 'chat' && input.chatSessionId) {
+    const existing = [...jobs.values()].find(
+      (j) =>
+        j.projectId === input.projectId &&
+        j.kind === 'chat' &&
+        j.chatSessionId === input.chatSessionId &&
+        (j.status === 'queued' || j.status === 'claiming' || j.status === 'running'),
+    );
+    if (existing) return existing;
+  }
+
   const blocked = runnerBlockReason(provider);
   if (blocked) {
     const failed: RunnerJob = {
@@ -176,6 +189,7 @@ export function enqueueRunnerJob(input: {
       projectId: input.projectId,
       taskId,
       autoRunId: input.autoRunId ?? null,
+      chatSessionId: input.chatSessionId ?? null,
       kind,
       studioKind: input.studioKind,
       prompt: input.prompt,
@@ -203,6 +217,7 @@ export function enqueueRunnerJob(input: {
     projectId: input.projectId,
     taskId,
     autoRunId: input.autoRunId ?? null,
+    chatSessionId: input.chatSessionId ?? null,
     kind,
     studioKind: input.studioKind,
     prompt: input.prompt,
@@ -258,6 +273,10 @@ async function runJob(jobId: string) {
 
   if (job.kind === 'studio') {
     await runStudioJob(jobId);
+    return;
+  }
+  if (job.kind === 'chat') {
+    await runChatJob(jobId);
     return;
   }
 
@@ -547,6 +566,88 @@ async function notifyStudioJobFinished(job: RunnerJob) {
   try {
     const { recordStudioOutcome } = await import('../services/studio-ai.js');
     recordStudioOutcome(job);
+  } catch {
+    /* optional */
+  }
+}
+
+async function runChatJob(jobId: string) {
+  let job = jobs.get(jobId);
+  if (!job) return;
+
+  const provider = job.provider ?? resolveRunnerProvider(job.projectId);
+  const controller = new AbortController();
+  controllers.set(jobId, controller);
+  const agentName = provider === 'opencode' ? 'opencode' : 'cursor-sdk';
+  const cwd = job.cwd;
+  const prompt = job.prompt;
+  const sessionId = job.chatSessionId;
+
+  const onLog = (kind: import('./logs.js').RunnerLogKind, text: string) => {
+    if (!sessionId) return;
+    void import('../services/chat-stream.js').then((m) => {
+      if (kind === 'assistant' || kind === 'thinking') {
+        m.updateOrAppendChatStream(sessionId, kind, text);
+      } else {
+        m.appendChatStream(sessionId, kind === 'error' ? 'error' : kind === 'tool' ? 'tool' : 'system', text);
+      }
+    });
+  };
+
+  try {
+    if (!cwd || !prompt || !sessionId) {
+      throw new Error('Chat job 缺少 cwd、prompt 或 chatSessionId');
+    }
+
+    job = touch(job, { status: 'running', provider, agentName });
+    onLog('system', `${provider === 'opencode' ? 'OpenCode' : 'Cursor SDK'} 開始執行…`);
+
+    const outcome =
+      provider === 'opencode'
+        ? await runOpenCodePrompt({
+            prompt,
+            cwd,
+            taskId: job.taskId || `chat-${sessionId.slice(0, 8)}`,
+            signal: controller.signal,
+            onLog,
+          })
+        : await runCursorSdkPrompt({
+            prompt,
+            cwd,
+            name: `pm-ai-chat-${sessionId.slice(0, 8)}`,
+            signal: controller.signal,
+            onLog,
+          });
+
+    job = touch(job, { sdkRunId: outcome.runId ?? null });
+
+    if (outcome.ok) {
+      const summary = (outcome.resultText ?? 'Agent 已完成').slice(0, 8000);
+      const done = touch(job, { status: 'completed', resultSummary: summary });
+      await notifyChatJobFinished(done);
+    } else if (outcome.status === 'cancelled' || controller.signal.aborted) {
+      const cancelled = touch(job, { status: 'cancelled', error: outcome.error ?? '已取消' });
+      await notifyChatJobFinished(cancelled);
+    } else {
+      const failed = touch(job, {
+        status: 'failed',
+        error: outcome.error ?? `狀態 ${outcome.status}`,
+      });
+      await notifyChatJobFinished(failed);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const failed = touch(job, { status: 'failed', error: message });
+    await notifyChatJobFinished(failed);
+  } finally {
+    controllers.delete(jobId);
+  }
+}
+
+async function notifyChatJobFinished(job: RunnerJob) {
+  try {
+    const { recordChatJobFinished } = await import('../services/chat.js');
+    recordChatJobFinished(job);
   } catch {
     /* optional */
   }

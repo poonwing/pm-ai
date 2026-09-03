@@ -181,3 +181,27 @@ export const reviewPolicies = sqliteTable('review_policies', {
   confirmedAt: text('confirmed_at'),
   updatedAt: text('updated_at').notNull(),
 });
+
+export const chatSessions = sqliteTable('chat_sessions', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id')
+    .notNull()
+    .references(() => projects.id),
+  title: text('title').notNull().default('新對話'),
+  mode: text('mode').notNull().default('ask'),
+  status: text('status').notNull().default('idle'),
+  provider: text('provider'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+export const chatMessages = sqliteTable('chat_messages', {
+  id: text('id').primaryKey(),
+  sessionId: text('session_id')
+    .notNull()
+    .references(() => chatSessions.id),
+  role: text('role').notNull(),
+  content: text('content').notNull(),
+  kind: text('kind').notNull().default('text'),
+  at: text('at').notNull(),
+});

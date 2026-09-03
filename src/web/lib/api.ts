@@ -776,6 +776,169 @@ export const autoApi = {
     }>(`/projects/${projectId}/runner/status`),
 };
 
+export type ChatMode = 'ask' | 'agent';
+
+export interface ChatSession {
+  id: string;
+  project_id: string;
+  title: string;
+  mode: ChatMode;
+  status: 'idle' | 'streaming' | 'running' | 'error';
+  provider?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  session_id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  kind: 'text' | 'system' | 'tool' | 'thinking' | 'error';
+  at: string;
+}
+
+export interface ChatStreamEvent {
+  seq: number;
+  at: string;
+  kind: 'system' | 'assistant' | 'tool' | 'thinking' | 'error' | 'status';
+  text: string;
+  messageId?: string;
+}
+
+export const chatApi = {
+  listSessions: (projectId: string) =>
+    api<ChatSession[]>(`/projects/${projectId}/chat/sessions`),
+  createSession: (projectId: string, data?: { title?: string; mode?: ChatMode }) =>
+    api<ChatSession>(`/projects/${projectId}/chat/sessions`, {
+      method: 'POST',
+      body: JSON.stringify(data ?? {}),
+    }),
+  getSession: (projectId: string, sessionId: string) =>
+    api<ChatSession>(`/projects/${projectId}/chat/sessions/${sessionId}`),
+  deleteSession: (projectId: string, sessionId: string) =>
+    api<{ deleted: boolean; id: string }>(
+      `/projects/${projectId}/chat/sessions/${sessionId}`,
+      { method: 'DELETE' },
+    ),
+  setMode: (projectId: string, sessionId: string, mode: ChatMode) =>
+    api<ChatSession>(`/projects/${projectId}/chat/sessions/${sessionId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ mode }),
+    }),
+  listMessages: (projectId: string, sessionId: string) =>
+    api<ChatMessage[]>(`/projects/${projectId}/chat/sessions/${sessionId}/messages`),
+  sendMessage: (
+    projectId: string,
+    sessionId: string,
+    data: { message: string; mode?: ChatMode },
+  ) =>
+    api<{ session: ChatSession; messages: ChatMessage[] }>(
+      `/projects/${projectId}/chat/sessions/${sessionId}/messages`,
+      { method: 'POST', body: JSON.stringify(data) },
+    ),
+  stream: (
+    projectId: string,
+    sessionId: string,
+    handlers: {
+      onInit?: (data: {
+        entries: ChatStreamEvent[];
+        latestSeq: number;
+        session: ChatSession;
+      }) => void;
+      onEvent?: (entry: ChatStreamEvent) => void;
+      onDone?: (data: { session: ChatSession; latestSeq: number }) => void;
+      onError?: (error: Error) => void;
+    },
+    options?: { sinceSeq?: number; signal?: AbortSignal },
+  ) => streamChatImpl(projectId, sessionId, handlers, options),
+};
+
+async function streamChatImpl(
+  projectId: string,
+  sessionId: string,
+  handlers: {
+    onInit?: (data: {
+      entries: ChatStreamEvent[];
+      latestSeq: number;
+      session: ChatSession;
+    }) => void;
+    onEvent?: (entry: ChatStreamEvent) => void;
+    onDone?: (data: { session: ChatSession; latestSeq: number }) => void;
+    onError?: (error: Error) => void;
+  },
+  options?: { sinceSeq?: number; signal?: AbortSignal },
+) {
+  const token = await fetchToken();
+  const sinceSeq = options?.sinceSeq ?? 0;
+  const params = new URLSearchParams({ since_seq: String(sinceSeq) });
+
+  try {
+    const res = await fetch(
+      `/api/v1/projects/${projectId}/chat/sessions/${sessionId}/stream?${params}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'X-PM-AI-Actor': 'human',
+          Accept: 'text/event-stream',
+        },
+        signal: options?.signal,
+      },
+    );
+    if (!res.ok) {
+      const err = (await res.json().catch(() => ({ error: res.statusText }))) as {
+        error?: string;
+      };
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error('無法讀取 streaming 回應');
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let eventName = 'message';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n');
+      buffer = parts.pop() ?? '';
+      for (const line of parts) {
+        if (line.startsWith('event:')) {
+          eventName = line.slice(6).trim();
+          continue;
+        }
+        if (!line.startsWith('data:')) continue;
+        const raw = line.slice(5).trim();
+        if (!raw) continue;
+        try {
+          const parsed = JSON.parse(raw) as unknown;
+          if (eventName === 'init') {
+            handlers.onInit?.(
+              parsed as {
+                entries: ChatStreamEvent[];
+                latestSeq: number;
+                session: ChatSession;
+              },
+            );
+          } else if (eventName === 'event') {
+            handlers.onEvent?.(parsed as ChatStreamEvent);
+          } else if (eventName === 'done') {
+            handlers.onDone?.(parsed as { session: ChatSession; latestSeq: number });
+          }
+        } catch {
+          /* ignore bad chunk */
+        }
+        eventName = 'message';
+      }
+    }
+  } catch (err) {
+    if (options?.signal?.aborted) return;
+    handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
+  }
+}
+
 export interface StudioMessage {
   id: string;
   role: 'user' | 'assistant' | 'system';

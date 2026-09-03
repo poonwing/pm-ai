@@ -44,6 +44,8 @@ import {
   CreateDesignSchema,
   UpdateDesignSchema,
   GenerateDesignSchema,
+  CreateChatSessionSchema,
+  SendChatMessageSchema,
   TASK_STATUSES,
   STATUS_LABELS,
   PORT,
@@ -76,6 +78,8 @@ import {
 } from './runner/index.js';
 import * as requirementsService from './services/requirements.js';
 import * as designsService from './services/designs.js';
+import * as chatService from './services/chat.js';
+import { getChatStream, subscribeChatStream } from './services/chat-stream.js';
 
 type Variables = {
   actor: 'human' | 'agent' | 'orchestrator';
@@ -1287,6 +1291,181 @@ app.put(
     }
   },
 );
+
+// —— Agent Chat ——
+app.get('/api/v1/projects/:id/chat/sessions', authMiddleware('human'), (c) => {
+  try {
+    return c.json(chatService.listChatSessions(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post(
+  '/api/v1/projects/:id/chat/sessions',
+  authMiddleware('human'),
+  zValidator('json', CreateChatSessionSchema),
+  (c) => {
+    try {
+      return c.json(chatService.createChatSession(requireParam(c, 'id'), c.req.valid('json')));
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  },
+);
+
+app.get('/api/v1/projects/:id/chat/sessions/:sid', authMiddleware('human'), (c) => {
+  try {
+    return c.json(chatService.getChatSession(requireParam(c, 'id'), requireParam(c, 'sid')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.delete('/api/v1/projects/:id/chat/sessions/:sid', authMiddleware('human'), (c) => {
+  try {
+    return c.json(chatService.deleteChatSession(requireParam(c, 'id'), requireParam(c, 'sid')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.patch(
+  '/api/v1/projects/:id/chat/sessions/:sid',
+  authMiddleware('human'),
+  zValidator('json', z.object({ mode: z.enum(['ask', 'agent']) })),
+  (c) => {
+    try {
+      return c.json(
+        chatService.updateChatSessionMode(
+          requireParam(c, 'id'),
+          requireParam(c, 'sid'),
+          c.req.valid('json').mode,
+        ),
+      );
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  },
+);
+
+app.get('/api/v1/projects/:id/chat/sessions/:sid/messages', authMiddleware('human'), (c) => {
+  try {
+    return c.json(chatService.listChatMessages(requireParam(c, 'id'), requireParam(c, 'sid')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.post(
+  '/api/v1/projects/:id/chat/sessions/:sid/messages',
+  authMiddleware('human'),
+  zValidator('json', SendChatMessageSchema),
+  async (c) => {
+    try {
+      return c.json(
+        await chatService.sendChatMessage(
+          requireParam(c, 'id'),
+          requireParam(c, 'sid'),
+          c.req.valid('json'),
+        ),
+      );
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  },
+);
+
+app.get('/api/v1/projects/:id/chat/sessions/:sid/stream', authMiddleware('human'), (c) => {
+  try {
+    const projectId = requireParam(c, 'id');
+    const sessionId = requireParam(c, 'sid');
+    chatService.getChatSession(projectId, sessionId);
+    const sinceSeq = Number(c.req.query('since_seq') ?? '0') || 0;
+    const encoder = new TextEncoder();
+    let unsubscribe: (() => void) | null = null;
+    let closed = false;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let statusTimer: ReturnType<typeof setInterval> | null = null;
+
+    const cleanup = (controller: ReadableStreamDefaultController<Uint8Array>) => {
+      if (closed) return;
+      closed = true;
+      unsubscribe?.();
+      unsubscribe = null;
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (statusTimer) clearInterval(statusTimer);
+      try {
+        controller.close();
+      } catch {
+        /* already closed */
+      }
+    };
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const send = (event: string, data: unknown) => {
+          if (closed) return;
+          controller.enqueue(
+            encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+          );
+        };
+
+        const { entries, latestSeq } = getChatStream(sessionId, sinceSeq);
+        let lastSeq = latestSeq;
+        send('init', {
+          entries,
+          latestSeq,
+          session: chatService.getChatSession(projectId, sessionId),
+        });
+
+        unsubscribe = subscribeChatStream(sessionId, (entry) => {
+          send('event', entry);
+          lastSeq = entry.seq;
+          if (entry.kind === 'status' && (entry.text === 'idle' || entry.text === 'error')) {
+            send('done', {
+              session: chatService.getChatSession(projectId, sessionId),
+              latestSeq: lastSeq,
+            });
+            cleanup(controller);
+          }
+        });
+
+        heartbeatTimer = setInterval(() => {
+          send('ping', { at: new Date().toISOString(), latestSeq: lastSeq });
+        }, 15000);
+
+        statusTimer = setInterval(() => {
+          try {
+            const session = chatService.getChatSession(projectId, sessionId);
+            if (session.status === 'idle' || session.status === 'error') {
+              send('done', { session, latestSeq: lastSeq });
+              cleanup(controller);
+            }
+          } catch {
+            cleanup(controller);
+          }
+        }, 2000);
+      },
+      cancel() {
+        closed = true;
+        unsubscribe?.();
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
+        if (statusTimer) clearInterval(statusTimer);
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      },
+    });
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
 
 // Activity status
 app.get('/api/v1/activity/recent', authMiddleware('any'), (c) => {

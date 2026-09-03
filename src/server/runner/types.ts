@@ -8,7 +8,7 @@ export type RunnerJobStatus =
   | 'failed'
   | 'cancelled';
 
-export type RunnerJobKind = 'task' | 'studio';
+export type RunnerJobKind = 'task' | 'studio' | 'chat';
 export type StudioKind = 'requirements' | 'design';
 
 export interface RunnerJob {
@@ -16,6 +16,7 @@ export interface RunnerJob {
   projectId: string;
   taskId: string;
   autoRunId?: string | null;
+  chatSessionId?: string | null;
   kind: RunnerJobKind;
   studioKind?: StudioKind;
   prompt?: string;

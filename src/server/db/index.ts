@@ -173,6 +173,26 @@ function runMigrations(db: ReturnType<typeof drizzle<typeof schema>>) {
       confirmed_at TEXT,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS chat_sessions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      title TEXT NOT NULL DEFAULT '新對話',
+      mode TEXT NOT NULL DEFAULT 'ask',
+      status TEXT NOT NULL DEFAULT 'idle',
+      provider TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_sessions_project ON chat_sessions(project_id, updated_at);
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES chat_sessions(id),
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'text',
+      at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, at);
   `);
 }
 

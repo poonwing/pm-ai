@@ -593,3 +593,40 @@ export const GenerateDesignSchema = z.object({
   design_id: z.string().optional(),
   title: z.string().optional(),
 });
+
+export const CHAT_MODES = ['ask', 'agent'] as const;
+export type ChatMode = (typeof CHAT_MODES)[number];
+
+export const CreateChatSessionSchema = z.object({
+  title: z.string().min(1).optional(),
+  mode: z.enum(CHAT_MODES).optional(),
+});
+
+export const SendChatMessageSchema = z.object({
+  message: z.string().min(1),
+  mode: z.enum(CHAT_MODES).optional(),
+});
+
+export const ChatMessageSchema = z.object({
+  id: z.string(),
+  session_id: z.string(),
+  role: z.enum(['user', 'assistant', 'system']),
+  content: z.string(),
+  kind: z.enum(['text', 'system', 'tool', 'thinking', 'error']).default('text'),
+  at: z.string(),
+});
+
+export type ChatMessage = z.infer<typeof ChatMessageSchema>;
+
+export const ChatSessionSchema = z.object({
+  id: z.string(),
+  project_id: z.string(),
+  title: z.string(),
+  mode: z.enum(CHAT_MODES),
+  status: z.enum(['idle', 'streaming', 'running', 'error']),
+  provider: z.string().nullable().optional(),
+  created_at: z.string(),
+  updated_at: z.string(),
+});
+
+export type ChatSession = z.infer<typeof ChatSessionSchema>;
