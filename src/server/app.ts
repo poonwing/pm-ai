@@ -68,6 +68,7 @@ import {
 } from './services/tasks.js';
 import * as agentsService from './services/agents.js';
 import * as autoService from './services/auto.js';
+import { listRunEvents } from './services/run-events.js';
 import * as orchestrator from './orchestrator/index.js';
 import { isModelConfigured } from './orchestrator/model.js';
 import {
@@ -1012,6 +1013,24 @@ app.get('/api/v1/runs/:id', authMiddleware('any'), (c) => {
 app.get('/api/v1/runs/:id/debug', authMiddleware('any'), async (c) => {
   try {
     return c.json(await orchestrator.getRunDebugSnapshot(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
+app.get('/api/v1/runs/:id/events', authMiddleware('any'), (c) => {
+  try {
+    const runId = requireParam(c, 'id');
+    autoService.getAutoRun(runId);
+    const category = c.req.query('category') || undefined;
+    const limitRaw = c.req.query('limit');
+    const limit = limitRaw ? Number(limitRaw) : 200;
+    return c.json({
+      events: listRunEvents(runId, {
+        category,
+        limit: Number.isFinite(limit) ? limit : 200,
+      }),
+    });
   } catch (err) {
     return errorResponse(c, err);
   }

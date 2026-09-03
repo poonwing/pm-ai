@@ -6,8 +6,8 @@ import {
   reopenTask,
 } from '../services/tasks.js';
 import type { DecisionOption } from '../services/auto.js';
-import { CUSTOM_DECISION_OPTION_ID } from '../../shared/schemas.js';
-import type { getAutoRun } from '../services/auto.js';
+import { getAutoRun } from '../services/auto.js';
+import { CUSTOM_DECISION_OPTION_ID, isPendingReview } from '../../shared/schemas.js';
 
 export type OrchestratorPhase =
   | 'intake'
@@ -201,6 +201,74 @@ export function collectRunTaskIds(
   }
 
   return [...ids];
+}
+
+export type RunProgressEvaluation = {
+  tasks: ReturnType<typeof listProjectTasks>;
+  open: ReturnType<typeof listProjectTasks>;
+  done: ReturnType<typeof listProjectTasks>;
+  cancelled: ReturnType<typeof listProjectTasks>;
+  pendingReview: ReturnType<typeof listProjectTasks>;
+  pendingAi: ReturnType<typeof listProjectTasks>;
+  pendingHuman: ReturnType<typeof listProjectTasks>;
+  /** No open work and no pending reviews → Auto Run may complete. */
+  canComplete: boolean;
+  summary: string;
+  scopedToRun: boolean;
+};
+
+/**
+ * Decide whether this Auto Run's work is finished.
+ * - Prefer tasks in checkpoint `created_task_ids` (+ research task).
+ * - `cancelled` counts as terminal (same as done for completion).
+ * - Pending AI/human review on done tasks still blocks completion.
+ */
+export function evaluateRunProgress(
+  projectId: string,
+  runId: string,
+): RunProgressEvaluation {
+  const run = getAutoRun(runId);
+  const runIds = new Set(collectRunTaskIds(run));
+  const all = listProjectTasks(projectId);
+  const scopedToRun = runIds.size > 0;
+  const tasks = scopedToRun ? all.filter((t) => runIds.has(t.id)) : all;
+
+  const done = tasks.filter((t) => t.status === 'done');
+  const cancelled = tasks.filter((t) => t.status === 'cancelled');
+  // Open = still actionable. Draft outside a run scope should not forever block Auto completion.
+  const open = scopedToRun
+    ? tasks.filter((t) => t.status !== 'done' && t.status !== 'cancelled')
+    : tasks.filter((t) => t.status === 'todo' || t.status === 'in_progress');
+  const pendingReview = done.filter((t) =>
+    isPendingReview(t as Parameters<typeof isPendingReview>[0]),
+  );
+  const pendingAi = pendingReview.filter(
+    (t) => t.review?.reviewer_type === 'agent' || t.review?.reviewer_type === 'orchestrator',
+  );
+  const pendingHuman = pendingReview.filter(
+    (t) => !t.review || t.review.reviewer_type === 'human',
+  );
+
+  const canComplete = open.length === 0 && pendingReview.length === 0;
+
+  const scope = scopedToRun ? '本 Run' : '專案';
+  const summary = [
+    `進度（${scope}）：共 ${tasks.length} 任務，完成 ${done.length}，已取消 ${cancelled.length}，未結束 ${open.length}`,
+    `待 AI 復查 ${pendingAi.length}，待人驗收 ${pendingHuman.length}`,
+  ].join('，');
+
+  return {
+    tasks,
+    open,
+    done,
+    cancelled,
+    pendingReview,
+    pendingAi,
+    pendingHuman,
+    canComplete,
+    summary,
+    scopedToRun,
+  };
 }
 
 export function hasActiveRunnerJob(

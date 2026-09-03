@@ -61,6 +61,8 @@ export function hydrateStateFromRun(
 
 export function graphHasPendingInterrupt(snapshot: {
   tasks?: Array<{ interrupts?: unknown[] }>;
+  interrupts?: unknown[];
 }): boolean {
-  return Boolean(snapshot.tasks?.some((t) => t.interrupts?.length));
+  if (Array.isArray(snapshot.interrupts) && snapshot.interrupts.length > 0) return true;
+  return Boolean(snapshot.tasks?.some((t) => Array.isArray(t.interrupts) && t.interrupts.length > 0));
 }

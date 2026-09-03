@@ -10,6 +10,7 @@ import {
   releaseTask,
 } from '../services/tasks.js';
 import { appendRunMessage } from '../services/auto.js';
+import { appendRunEvent } from '../services/run-events.js';
 import { readProjectConfig } from '../services/files.js';
 import { runCursorSdkPrompt } from './cursor-sdk-runner.js';
 import { runOpenCodePrompt } from './opencode-runner.js';
@@ -360,6 +361,16 @@ async function runJob(jobId: string) {
     );
     if (job.autoRunId) {
       appendRunMessage(job.autoRunId, 'system', `${label} 開始執行 ${job.taskId} @ ${cwd}`);
+      appendRunEvent(
+        job.autoRunId,
+        'runner_started',
+        'runner',
+        `${label} 開始 ${job.taskId}`,
+        {
+          taskId: job.taskId,
+          data: { provider, agentName, cwd, jobId: job.id },
+        },
+      );
     }
 
     let outcome =
@@ -388,6 +399,16 @@ async function runJob(jobId: string) {
           job.autoRunId,
           'system',
           `Runner 連線失敗（${outcome.error ?? outcome.status}），${attempt + 1}/${RUNNER_PROMPT_MAX_ATTEMPTS} 次重試…`,
+        );
+        appendRunEvent(
+          job.autoRunId,
+          'runner_retry',
+          'runner',
+          `Runner 重試 ${job.taskId}（${attempt + 1}/${RUNNER_PROMPT_MAX_ATTEMPTS}）`,
+          {
+            taskId: job.taskId,
+            data: { error: outcome.error ?? outcome.status, attempt: attempt + 1 },
+          },
         );
       }
       await sleep(400 * attempt);
@@ -429,6 +450,16 @@ async function runJob(jobId: string) {
       });
       if (job.autoRunId) {
         appendRunMessage(job.autoRunId, 'assistant', `任務 ${job.taskId} 已由 ${label} 完成。`);
+        appendRunEvent(
+          job.autoRunId,
+          'runner_completed',
+          'runner',
+          `${label} 完成 ${job.taskId}`,
+          {
+            taskId: job.taskId,
+            data: { provider, jobId: job.id, durationMs: outcome.durationMs ?? null },
+          },
+        );
       }
       notifyRunnerTaskEvent(job.projectId, job.taskId, 'runner_completed');
     } else if (outcome.status === 'cancelled' || controller.signal.aborted) {
@@ -476,6 +507,16 @@ async function runJob(jobId: string) {
           'system',
           `任務 ${job.taskId} Runner 失敗：${outcome.error ?? outcome.status}`,
         );
+        appendRunEvent(
+          job.autoRunId,
+          'runner_failed',
+          'runner',
+          `Runner 失敗 ${job.taskId}`,
+          {
+            taskId: job.taskId,
+            data: { error: outcome.error ?? outcome.status, jobId: job.id },
+          },
+        );
       }
       notifyRunnerTaskEvent(job.projectId, job.taskId, 'runner_failed');
     }
@@ -492,6 +533,10 @@ async function runJob(jobId: string) {
     touch(job, { status: 'failed', error: message });
     if (job.autoRunId) {
       appendRunMessage(job.autoRunId, 'system', `任務 ${job.taskId} Runner 異常：${message}`);
+      appendRunEvent(job.autoRunId, 'runner_failed', 'runner', `Runner 異常 ${job.taskId}`, {
+        taskId: job.taskId,
+        data: { error: message, jobId: job.id },
+      });
     }
     notifyRunnerTaskEvent(job.projectId, job.taskId, 'runner_failed');
   } finally {

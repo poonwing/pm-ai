@@ -11,13 +11,11 @@ import {
 } from '../services/auto.js';
 import { ensureDefaultStaffAgents } from '../services/agents.js';
 import {
-  getInbox,
   listProjectTasks,
   updateProject,
   ValidationError,
 } from '../services/tasks.js';
 import { getRunnerStatus } from '../runner/index.js';
-import { isPendingReview } from '../../shared/schemas.js';
 import { getCompiledOrchestratorGraph } from './graph.js';
 import {
   buildInitialGraphState,
@@ -40,6 +38,7 @@ import {
   markClarifiedAndContinue,
   tryParseDecisionReply,
   collectRunTaskIds,
+  evaluateRunProgress,
   type OrchestratorPlan,
 } from './helpers.js';
 import { reconcileRunnerFailures } from './nodes/reconcile-runner.js';
@@ -149,6 +148,8 @@ function buildGraphInvokeCommand(input: {
   const researchTaskId =
     typeof cp.research_task_id === 'string' ? cp.research_task_id : null;
   const update = { ...hydrated, pendingCommand };
+  // Prefer a concrete resume payload — some LangGraph versions treat `null` as "no resume".
+  const resumePayload = { source: pendingCommand.type ?? 'tick' };
 
   if (userClarifyTurn) {
     return new Command({
@@ -160,7 +161,7 @@ function buildGraphInvokeCommand(input: {
   // Research Runner finished but graph may still be parked at END after interrupt.
   if (!researchDone && researchTaskId) {
     return new Command({
-      ...(pendingInterrupt ? { resume: null } : { goto: 'research' as const }),
+      ...(pendingInterrupt ? { resume: resumePayload } : { goto: 'research' as const }),
       update,
     });
   }
@@ -173,16 +174,70 @@ function buildGraphInvokeCommand(input: {
     (run.phase === 'clarify' || run.phase === 'intake')
   ) {
     return new Command({
-      ...(pendingInterrupt ? { resume: null } : { goto: 'clarify' as const }),
+      ...(pendingInterrupt ? { resume: resumePayload } : { goto: 'clarify' as const }),
       update,
     });
   }
 
   if (pendingInterrupt) {
-    return new Command({ resume: null, update });
+    return new Command({ resume: resumePayload, update });
+  }
+
+  // DB says we're waiting, but checkpoint has no interrupt (lost / undetected).
+  // Force re-enter the execution loop so「推進一步」cannot no-op.
+  const waitingPhase =
+    run.phase === 'wait_events' ||
+    run.phase === 'synthesize' ||
+    isWaitingPhase(run.phase);
+  const wantsAdvance =
+    pendingCommand.type === 'tick' ||
+    pendingCommand.type === 'task_event' ||
+    pendingCommand.type === 'retry_runner' ||
+    pendingCommand.type === 'decision_resolved';
+  if (waitingPhase && wantsAdvance) {
+    return new Command({
+      goto: 'reconcileRunner' as const,
+      update: { ...update, status: 'running' },
+    });
   }
 
   return new Command({ update });
+}
+
+function tryCompleteRunIfIdle(runId: string, reason: string): boolean {
+  const run = getAutoRun(runId);
+  if (run.status === 'stopped' || run.status === 'completed') return false;
+  const progress = evaluateRunProgress(run.project_id, runId);
+  if (!progress.canComplete) return false;
+
+  const detail =
+    progress.tasks.length === 0
+      ? '沒有待辦任務'
+      : `完成 ${progress.done.length}、取消 ${progress.cancelled.length}、待審 0`;
+  appendRunMessage(runId, 'assistant', `${reason}（${detail}）。結束 Auto Run。`);
+  appendRunEventSafe(runId, 'status_changed', 'system', `${reason} → completed`, {
+    data: {
+      done: progress.done.length,
+      cancelled: progress.cancelled.length,
+      scopedToRun: progress.scopedToRun,
+    },
+  });
+  updateAutoRun(runId, { status: 'completed', phase: 'completed' });
+  return true;
+}
+
+function appendRunEventSafe(
+  runId: string,
+  type: string,
+  category: 'system' | 'graph',
+  summary: string,
+  opts?: { data?: Record<string, unknown> },
+) {
+  void import('../services/run-events.js')
+    .then((m) =>
+      m.appendRunEvent(runId, type, category, summary, { data: opts?.data }),
+    )
+    .catch(() => undefined);
 }
 
 async function runGraphUnlocked(
@@ -191,7 +246,34 @@ async function runGraphUnlocked(
 ): Promise<TickResult> {
   let run = getAutoRun(runId);
   if (run.status === 'stopped' || run.status === 'paused' || run.status === 'completed') {
+    if (command?.type === 'tick') {
+      appendRunMessage(
+        runId,
+        'system',
+        `推進略過：Run 目前是 ${run.status}（已結束或暫停的 Run 不會再推進；請重新啟動）。`,
+      );
+    }
     return runResult(runId);
+  }
+
+  // Fast-path: all run work already terminal → complete without depending on graph resume.
+  if (
+    command?.type === 'tick' ||
+    command?.type === 'retry_runner' ||
+    (command?.type === 'task_event' &&
+      (command.event === 'cancelled' || command.event === 'runner_completed'))
+  ) {
+    if (tryCompleteRunIfIdle(runId, '檢測到本 Run 已無未完成任務')) {
+      return runResult(runId);
+    }
+  }
+
+  if (command?.type === 'tick') {
+    appendRunMessage(
+      runId,
+      'system',
+      `收到「推進一步」（phase=${run.phase}）。正在喚醒編排…`,
+    );
   }
 
   await advanceResearchIfTaskDone(runId);
@@ -204,39 +286,67 @@ async function runGraphUnlocked(
   const pendingInterrupt = graphHasPendingInterrupt(snapshot);
   const graphValues = snapshot.values as Partial<OrchestratorStateType> | undefined;
 
-  if (!hasGraphState) {
-    const initial = mergeRunIntoState(run);
-    if (command) initial.pendingCommand = command;
-    await graph.invoke(initial, config);
-    await forceDispatchAiReviewsAfterTick(runId, command);
-    return runResult(runId, {
-      decisions: listDecisions(run.project_id, 'open').filter((d) => d.run_id === runId),
-      tasks: createdTaskIdsFromCheckpoint(getAutoRun(runId).checkpoint),
+  if (command?.type === 'tick') {
+    appendRunEventSafe(runId, 'tick', 'system', '推進一步', {
+      data: {
+        phase: run.phase,
+        pendingInterrupt,
+        hasGraphState,
+        next: Array.isArray(snapshot.next) ? snapshot.next : [],
+      },
     });
   }
 
-  const hydrated = hydrateStateFromRun(runId, graphValues);
-  const pendingCommand = command ?? { type: 'tick' as const };
-  const userClarifyTurn = Boolean(
-    command?.type === 'user_message' &&
-      isClarifyPhase(run.phase) &&
-      !isStartWorkRequest(command.text),
-  );
+  try {
+    if (!hasGraphState) {
+      const initial = mergeRunIntoState(run);
+      if (command) initial.pendingCommand = command;
+      await graph.invoke(initial, config);
+    } else {
+      const hydrated = hydrateStateFromRun(runId, graphValues);
+      const pendingCommand = command ?? { type: 'tick' as const };
+      const userClarifyTurn = Boolean(
+        command?.type === 'user_message' &&
+          isClarifyPhase(run.phase) &&
+          !isStartWorkRequest(command.text),
+      );
 
-  const input = buildGraphInvokeCommand({
-    runId,
-    run,
-    pendingCommand,
-    hydrated,
-    pendingInterrupt,
-    userClarifyTurn,
-  });
+      const input = buildGraphInvokeCommand({
+        runId,
+        run,
+        pendingCommand,
+        hydrated,
+        pendingInterrupt,
+        userClarifyTurn,
+      });
 
-  await graph.invoke(input as Parameters<typeof graph.invoke>[0], config);
+      await graph.invoke(input as Parameters<typeof graph.invoke>[0], config);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    appendRunMessage(runId, 'system', `推進失敗：${msg}`);
+    // Still try to complete if work is idle — graph errors should not strand the run.
+    tryCompleteRunIfIdle(runId, '圖執行出錯，但任務已全部結束');
+    throw err;
+  }
 
   await forceDispatchAiReviewsAfterTick(runId, command);
 
+  // Safety net after graph hop (e.g. synthesize didn't mark complete).
+  if (command?.type === 'tick' || command?.type === 'task_event') {
+    tryCompleteRunIfIdle(runId, '推進後確認本 Run 已無未完成任務');
+  }
+
   const latest = getAutoRun(runId);
+  if (command?.type === 'tick') {
+    const progress = evaluateRunProgress(latest.project_id, runId);
+    appendRunMessage(
+      runId,
+      'system',
+      `推進完成：status=${latest.status} phase=${latest.phase}；${progress.summary}`,
+    );
+  }
+
   return runResult(runId, {
     decisions: listDecisions(latest.project_id, 'open').filter((d) => d.run_id === runId),
     tasks: createdTaskIdsFromCheckpoint(latest.checkpoint),
@@ -260,6 +370,17 @@ async function forceDispatchAiReviewsAfterTick(
   const summary = formatDispatchAiReviewsResult(result);
   if (summary) {
     appendRunMessage(runId, 'system', `[推進] ${summary}`);
+    const { appendRunEvent } = await import('../services/run-events.js');
+    appendRunEvent(runId, 'tick', 'system', `[推進] ${summary}`, {
+      data: {
+        started: result.started,
+        skippedInFlight: result.skippedInFlight,
+        skippedCooldown: result.skippedCooldown,
+        pending: result.pending,
+        modelMissing: result.modelMissing,
+        force: command.type === 'tick',
+      },
+    });
   }
 }
 
@@ -516,21 +637,9 @@ export function requestStop(runId: string) {
 }
 
 export function synthesizeProgress(projectId: string, runId: string) {
-  const tasks = listProjectTasks(projectId);
-  const inbox = getInbox().filter((t) => t.projectId === projectId || t.project_id === projectId);
-  const done = tasks.filter((t) => t.status === 'done');
-  const pendingReview = done.filter((t) =>
-    isPendingReview(t as Parameters<typeof isPendingReview>[0]),
-  );
-  const pendingAi = pendingReview.filter(
-    (t) => t.review?.reviewer_type === 'agent' || t.review?.reviewer_type === 'orchestrator',
-  );
-  const pendingHuman = pendingReview.filter(
-    (t) => !t.review || t.review.reviewer_type === 'human',
-  );
-  const summary = `進度：共 ${tasks.length} 任務，完成 ${done.length}，待 AI 復查 ${pendingAi.length}，待人驗收 ${pendingHuman.length}，inbox ${inbox.length}`;
-  appendRunMessage(runId, 'assistant', summary);
-  if (tasks.length && done.length === tasks.length && pendingReview.length === 0) {
+  const progress = evaluateRunProgress(projectId, runId);
+  appendRunMessage(runId, 'assistant', progress.summary);
+  if (progress.canComplete) {
     updateAutoRun(runId, { status: 'completed', phase: 'completed' });
   }
   return getAutoRun(runId);

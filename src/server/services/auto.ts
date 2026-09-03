@@ -2,6 +2,7 @@ import { eq, and, desc } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb, schema } from '../db/index.js';
 import { NotFoundError, ValidationError } from './tasks.js';
+import { appendRunEvent } from './run-events.js';
 import {
   CUSTOM_DECISION_OPTION_ID,
   ReviewPolicySchema,
@@ -109,6 +110,9 @@ export function createAutoRun(projectId: string, goal: string) {
     })
     .run();
   appendRunMessage(id, 'user', goal);
+  appendRunEvent(id, 'run_started', 'system', `Auto Run 已啟動：${goal.slice(0, 120)}`, {
+    data: { goal },
+  });
   return getAutoRun(id);
 }
 
@@ -123,11 +127,13 @@ export function updateAutoRun(
 ) {
   const row = getDb().select().from(schema.autoRuns).where(eq(schema.autoRuns.id, runId)).get();
   if (!row) throw new NotFoundError('Auto Run 不存在');
+  const nextStatus = patch.status ?? row.status;
+  const nextPhase = patch.phase ?? row.phase;
   getDb()
     .update(schema.autoRuns)
     .set({
-      status: patch.status ?? row.status,
-      phase: patch.phase ?? row.phase,
+      status: nextStatus,
+      phase: nextPhase,
       goal: patch.goal ?? row.goal,
       checkpointJson:
         patch.checkpoint !== undefined
@@ -144,6 +150,18 @@ export function updateAutoRun(
     })
     .where(eq(schema.autoRuns.id, runId))
     .run();
+
+  if (patch.phase !== undefined && patch.phase !== row.phase) {
+    appendRunEvent(runId, 'phase_changed', 'graph', `${row.phase} → ${patch.phase}`, {
+      data: { from: row.phase, to: patch.phase, status: nextStatus },
+    });
+  }
+  if (patch.status !== undefined && patch.status !== row.status) {
+    appendRunEvent(runId, 'status_changed', 'system', `狀態 ${row.status} → ${patch.status}`, {
+      data: { from: row.status, to: patch.status, phase: nextPhase },
+    });
+  }
+
   return getAutoRun(runId);
 }
 
@@ -233,6 +251,9 @@ export function createDecision(input: {
     .run();
   if (input.runId) {
     updateAutoRun(input.runId, { status: 'awaiting_human', phase: 'decision' });
+    appendRunEvent(input.runId, 'decision_opened', 'decision', `決策開啟：${input.title}`, {
+      data: { decisionId: id, title: input.title },
+    });
   }
   return getDecision(id);
 }
@@ -275,6 +296,20 @@ export function resolveDecision(
     let content = `人類已選擇決策「${decision.title}」：${label}`;
     if (noteTrim) content += `\n補充說明：${noteTrim}`;
     appendRunMessage(decision.run_id, 'user', content);
+    appendRunEvent(
+      decision.run_id,
+      'decision_resolved',
+      'decision',
+      `決策已選：${decision.title} → ${label}`,
+      {
+        data: {
+          decisionId: decisionId,
+          chosenOptionId,
+          label,
+          note: noteTrim || null,
+        },
+      },
+    );
     // Continue orchestration (not wait_events synthesize-only)
     updateAutoRun(decision.run_id, { status: 'running', phase: 'plan' });
   }

@@ -131,6 +131,18 @@ function runMigrations(db: ReturnType<typeof drizzle<typeof schema>>) {
       at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_auto_run_messages ON auto_run_messages(run_id, at);
+    CREATE TABLE IF NOT EXISTS auto_run_events (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES auto_runs(id),
+      category TEXT NOT NULL,
+      type TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      data_json TEXT NOT NULL DEFAULT '{}',
+      task_id TEXT,
+      at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_auto_run_events ON auto_run_events(run_id, at);
+    CREATE INDEX IF NOT EXISTS idx_auto_run_events_cat ON auto_run_events(run_id, category, at);
     CREATE TABLE IF NOT EXISTS decisions (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL REFERENCES projects(id),

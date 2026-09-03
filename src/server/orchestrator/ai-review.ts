@@ -4,6 +4,7 @@
  * and apply approve/reject (reject re-queues the implementer via Runner).
  */
 import { appendRunMessage } from '../services/auto.js';
+import { appendRunEvent } from '../services/run-events.js';
 import {
   ensureOrchestratorAgent,
   getStaffAgent,
@@ -217,6 +218,16 @@ async function runOneAiReview(projectId: string, runId: string, taskId: string) 
     'assistant',
     `正在派 ${reviewer.name}（${reviewer.role}）復查 ${taskId}「${task.title}」…（GLM 審查中，非 Cursor/OpenCode Runner）`,
   );
+  appendRunEvent(
+    runId,
+    'ai_review_started',
+    'ai_review',
+    `開始復查 ${taskId}（${reviewer.name}）`,
+    {
+      taskId,
+      data: { reviewerId: reviewer.id, reviewerName: reviewer.name, role: reviewer.role },
+    },
+  );
 
   try {
     const changeContext = buildChangeContext(projectId, taskId);
@@ -240,6 +251,10 @@ async function runOneAiReview(projectId: string, runId: string, taskId: string) 
         'assistant',
         `${reviewer.name} 已通過 ${taskId}：${result.note}`,
       );
+      appendRunEvent(runId, 'ai_review_approved', 'ai_review', `復查通過 ${taskId}`, {
+        taskId,
+        data: { note: result.note, reviewerName: reviewer.name },
+      });
     } else {
       rejectReview(projectId, taskId, result.note, {
         actor: 'agent',
@@ -250,6 +265,10 @@ async function runOneAiReview(projectId: string, runId: string, taskId: string) 
         'assistant',
         `${reviewer.name} 退回 ${taskId}：${result.note}。將重新提交 Runner 實作。`,
       );
+      appendRunEvent(runId, 'ai_review_rejected', 'ai_review', `復查退回 ${taskId}`, {
+        taskId,
+        data: { note: result.note, reviewerName: reviewer.name },
+      });
       const { enqueueRunnerJob } = await import('../runner/index.js');
       enqueueRunnerJob({ projectId, taskId, autoRunId: runId });
     }
@@ -263,6 +282,10 @@ async function runOneAiReview(projectId: string, runId: string, taskId: string) 
       'system',
       `任務 ${taskId} AI 復查失敗：${msg}（將冷卻 ${REVIEW_COOLDOWN_MS / 1000}s；點「推進一步」可立即重試）`,
     );
+    appendRunEvent(runId, 'ai_review_failed', 'ai_review', `復查失敗 ${taskId}`, {
+      taskId,
+      data: { error: msg, cooldownMs: REVIEW_COOLDOWN_MS },
+    });
     reviewCooldownUntil.set(taskId, Date.now() + REVIEW_COOLDOWN_MS);
     resumeAfterReview(runId);
   }

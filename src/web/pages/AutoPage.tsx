@@ -6,11 +6,91 @@ import {
   AutoRun,
   AutoRunMessage,
   AutoRunDebugSnapshot,
+  AutoRunEvent,
   Decision,
   ReviewPolicy,
   Project,
 } from '../lib/api';
 import { Button, Input, Textarea, Label, Badge } from '../components/ui';
+import { AutoWorkflowDiagram } from '../components/AutoWorkflowDiagram';
+
+const EVENT_FILTERS = [
+  { id: 'all', label: '全部' },
+  { id: 'graph', label: 'Graph' },
+  { id: 'runner', label: 'Runner' },
+  { id: 'ai_review', label: 'AI 復查' },
+  { id: 'decision', label: '決策' },
+  { id: 'system', label: '系統' },
+] as const;
+
+function eventCategoryClass(category: string): string {
+  switch (category) {
+    case 'runner':
+      return 'bg-sky-100 text-sky-900';
+    case 'ai_review':
+      return 'bg-violet-100 text-violet-900';
+    case 'decision':
+      return 'bg-amber-100 text-amber-900';
+    case 'graph':
+      return 'bg-emerald-100 text-emerald-900';
+    default:
+      return 'bg-zinc-100 text-zinc-800';
+  }
+}
+
+function EventTimeline({ events }: { events: AutoRunEvent[] }) {
+  const [filter, setFilter] = useState<(typeof EVENT_FILTERS)[number]['id']>('all');
+  const filtered =
+    filter === 'all' ? events : events.filter((e) => e.category === filter);
+  const recent = filtered.slice(-60);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
+        <div className="text-xs text-muted-foreground">事件時間線</div>
+        <div className="flex flex-wrap gap-1">
+          {EVENT_FILTERS.map((f) => (
+            <Button
+              key={f.id}
+              size="sm"
+              variant={filter === f.id ? 'default' : 'ghost'}
+              className="h-6 px-2 text-[11px]"
+              onClick={() => setFilter(f.id)}
+            >
+              {f.label}
+            </Button>
+          ))}
+        </div>
+      </div>
+      {recent.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          尚無結構化事件（重啟服務後新產生的 Run 活動才會寫入）。
+        </p>
+      ) : (
+        <ul className="max-h-56 overflow-y-auto flex flex-col gap-1 border border-border rounded-md bg-white p-2">
+          {recent.map((e) => (
+            <li
+              key={e.id}
+              className="text-xs flex flex-wrap items-baseline gap-x-2 gap-y-0.5 border-b border-border/40 pb-1 last:border-0"
+            >
+              <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
+                {new Date(e.at).toLocaleTimeString()}
+              </span>
+              <Badge className={`text-[10px] px-1.5 py-0 ${eventCategoryClass(e.category)}`}>
+                {e.category}
+              </Badge>
+              <span className="font-mono text-[10px] text-muted-foreground">{e.type}</span>
+              <span className="min-w-0 break-words">{e.summary}</span>
+              {e.task_id && (
+                <code className="text-[10px] text-muted-foreground">{e.task_id}</code>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 function blockedBadgeClass(reason: string): string {
   if (reason === 'none' || reason === 'completed') return 'bg-emerald-100 text-emerald-800';
@@ -109,6 +189,8 @@ function RunInspector({
 
       {open && debug && (
         <div className="flex flex-col gap-3 text-sm">
+          <AutoWorkflowDiagram debug={debug} />
+
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
             <div className="border border-border rounded-md p-2 bg-white">
               <div className="text-muted-foreground">Run</div>
@@ -212,6 +294,8 @@ function RunInspector({
               </ul>
             </div>
           )}
+
+          <EventTimeline events={debug.events ?? []} />
 
           <div>
             <div className="text-xs text-muted-foreground mb-1">Checkpoint 摘要</div>
@@ -810,9 +894,17 @@ export function AutoPage() {
                 variant="ghost"
                 disabled={busy}
                 onClick={() =>
-                  runAction('推進', () =>
-                    autoApi.tick(activeRun.id).then(() => refreshRun(activeRun.id)),
-                  )
+                  runAction('推進', async () => {
+                    const result = await autoApi.tick(activeRun.id);
+                    if (result.run) {
+                      setRuns((prev) =>
+                        prev.map((r) => (r.id === result.run.id ? { ...r, ...result.run } : r)),
+                      );
+                    }
+                    if (result.messages) setMessages(result.messages);
+                    await refreshRun(activeRun.id);
+                    await load();
+                  })
                 }
               >
                 推進一步

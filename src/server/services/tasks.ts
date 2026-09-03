@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import fs from 'fs';
 import { getDb, schema } from '../db/index.js';
+import { deleteRunEventsForRuns } from './run-events.js';
 import {
   readProjectConfig,
   writeProjectConfig,
@@ -943,7 +944,13 @@ export function publishTask(projectId: string, taskId: string) {
 }
 
 export function cancelTask(projectId: string, taskId: string, reason?: string) {
-  return transitionTask(projectId, taskId, 'cancelled', 'human', undefined, { reason });
+  const result = transitionTask(projectId, taskId, 'cancelled', 'human', undefined, { reason });
+  setImmediate(() => {
+    void import('../orchestrator/index.js')
+      .then((m) => m.onTaskEvent(projectId, taskId, 'cancelled'))
+      .catch(() => undefined);
+  });
+  return result;
 }
 
 export function reopenTask(projectId: string, taskId: string) {
@@ -2216,6 +2223,7 @@ export async function deleteProject(projectId: string, options: { force?: boolea
       db.delete(schema.autoRunMessages)
         .where(inArray(schema.autoRunMessages.runId, runIds))
         .run();
+      deleteRunEventsForRuns(runIds);
     }
 
     db.delete(schema.meetings).where(eq(schema.meetings.projectId, projectId)).run();

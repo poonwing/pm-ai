@@ -754,7 +754,19 @@ export interface AutoRunDebugSnapshot {
     runner_retry_counts: Record<string, number>;
     runner_stall_notified: string[];
   };
+  events: AutoRunEvent[];
   generatedAt: string;
+}
+
+export interface AutoRunEvent {
+  id: string;
+  run_id: string;
+  category: 'graph' | 'runner' | 'ai_review' | 'decision' | 'system' | string;
+  type: string;
+  summary: string;
+  data: Record<string, unknown>;
+  task_id: string | null;
+  at: string;
 }
 
 export interface Decision {
@@ -826,6 +838,13 @@ export const autoApi = {
   getRun: (runId: string) =>
     api<{ run: AutoRun; messages: AutoRunMessage[]; decisions: Decision[] }>(`/runs/${runId}`),
   getRunDebug: (runId: string) => api<AutoRunDebugSnapshot>(`/runs/${runId}/debug`),
+  listEvents: (runId: string, opts?: { category?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (opts?.category) q.set('category', opts.category);
+    if (opts?.limit) q.set('limit', String(opts.limit));
+    const qs = q.toString();
+    return api<{ events: AutoRunEvent[] }>(`/runs/${runId}/events${qs ? `?${qs}` : ''}`);
+  },
   message: (runId: string, message: string) =>
     api<{ run: AutoRun; messages: AutoRunMessage[]; decisions?: Decision[] }>(
       `/runs/${runId}/message`,

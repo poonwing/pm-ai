@@ -17,6 +17,7 @@ import {
   runnerStallNotifiedFromCheckpoint,
 } from './helpers.js';
 import { listAiReviewDebug } from './ai-review.js';
+import { listRunEvents } from '../services/run-events.js';
 
 export type BlockedReason =
   | 'none'
@@ -278,6 +279,7 @@ export async function getRunDebugSnapshot(runId: string) {
       status: d.status,
     })),
     checkpoint: pickCheckpointSummary(cp),
+    events: listRunEvents(runId, { limit: 80 }),
     generatedAt: new Date().toISOString(),
   };
 }

@@ -129,6 +129,20 @@ export const autoRunMessages = sqliteTable('auto_run_messages', {
   at: text('at').notNull(),
 });
 
+/** Structured Auto Run timeline events (Plan C). */
+export const autoRunEvents = sqliteTable('auto_run_events', {
+  id: text('id').primaryKey(),
+  runId: text('run_id')
+    .notNull()
+    .references(() => autoRuns.id),
+  category: text('category').notNull(),
+  type: text('type').notNull(),
+  summary: text('summary').notNull(),
+  dataJson: text('data_json').notNull().default('{}'),
+  taskId: text('task_id'),
+  at: text('at').notNull(),
+});
+
 export const decisions = sqliteTable('decisions', {
   id: text('id').primaryKey(),
   projectId: text('project_id')
