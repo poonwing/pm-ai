@@ -195,6 +195,12 @@ async function decideReview(
   return { decision, note };
 }
 
+function resumeAfterReview(runId: string) {
+  void import('./index.js')
+    .then((m) => m.resumeOrchestrator(runId))
+    .catch(() => undefined);
+}
+
 async function runOneAiReview(projectId: string, runId: string, taskId: string) {
   const task = getTask(projectId, taskId);
   if (!isAiReviewPending(task)) return;
@@ -209,7 +215,7 @@ async function runOneAiReview(projectId: string, runId: string, taskId: string) 
   appendRunMessage(
     runId,
     'assistant',
-    `正在派 ${reviewer.name}（${reviewer.role}）復查 ${taskId}「${task.title}」…`,
+    `正在派 ${reviewer.name}（${reviewer.role}）復查 ${taskId}「${task.title}」…（GLM 審查中，非 Cursor/OpenCode Runner）`,
   );
 
   try {
@@ -249,25 +255,48 @@ async function runOneAiReview(projectId: string, runId: string, taskId: string) 
     }
 
     reviewCooldownUntil.delete(taskId);
-    void import('./index.js')
-      .then((m) => m.resumeOrchestrator(runId))
-      .catch(() => undefined);
+    resumeAfterReview(runId);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    appendRunMessage(runId, 'system', `任務 ${taskId} AI 復查失敗：${msg}`);
+    appendRunMessage(
+      runId,
+      'system',
+      `任務 ${taskId} AI 復查失敗：${msg}（將冷卻 ${REVIEW_COOLDOWN_MS / 1000}s；點「推進一步」可立即重試）`,
+    );
     reviewCooldownUntil.set(taskId, Date.now() + REVIEW_COOLDOWN_MS);
+    resumeAfterReview(runId);
   }
 }
 
+export type DispatchAiReviewsResult = {
+  started: string[];
+  skippedInFlight: string[];
+  skippedCooldown: string[];
+  pending: string[];
+  modelMissing: boolean;
+};
+
 /** Find done tasks awaiting agent/orchestrator review and start reviews (deduped). */
-export function dispatchPendingAiReviews(projectId: string, runId: string): string[] {
+export function dispatchPendingAiReviews(
+  projectId: string,
+  runId: string,
+  opts?: { force?: boolean },
+): DispatchAiReviewsResult {
   const tasks = listProjectTasks(projectId);
-  const pending = tasks.filter((t) => isAiReviewPending(t));
-  if (!pending.length) return [];
+  const pendingTasks = tasks.filter((t) => isAiReviewPending(t));
+  const pending = pendingTasks.map((t) => t.id);
+  const empty: DispatchAiReviewsResult = {
+    started: [],
+    skippedInFlight: [],
+    skippedCooldown: [],
+    pending,
+    modelMissing: false,
+  };
+  if (!pendingTasks.length) return empty;
 
   if (!isModelConfigured()) {
     const key = `${runId}:no-model`;
-    if (!modelMissingNotified.has(key)) {
+    if (!modelMissingNotified.has(key) || opts?.force) {
       modelMissingNotified.add(key);
       appendRunMessage(
         runId,
@@ -275,16 +304,25 @@ export function dispatchPendingAiReviews(projectId: string, runId: string): stri
         '未配置 ZAI_API_KEY，無法執行 AI 復查；任務仍維持待 AI 復查。請配置後點「推進一步」重試。',
       );
     }
-    return [];
+    return { ...empty, modelMissing: true };
   }
 
   const started: string[] = [];
+  const skippedInFlight: string[] = [];
+  const skippedCooldown: string[] = [];
   const now = Date.now();
 
-  for (const task of pending) {
-    if (reviewingTaskIds.has(task.id)) continue;
+  for (const task of pendingTasks) {
+    if (reviewingTaskIds.has(task.id)) {
+      skippedInFlight.push(task.id);
+      continue;
+    }
     const coolUntil = reviewCooldownUntil.get(task.id) ?? 0;
-    if (now < coolUntil) continue;
+    if (!opts?.force && now < coolUntil) {
+      skippedCooldown.push(task.id);
+      continue;
+    }
+    if (opts?.force) reviewCooldownUntil.delete(task.id);
     reviewingTaskIds.add(task.id);
     started.push(task.id);
     void runOneAiReview(projectId, runId, task.id).finally(() => {
@@ -292,7 +330,33 @@ export function dispatchPendingAiReviews(projectId: string, runId: string): stri
     });
   }
 
-  return started;
+  return { started, skippedInFlight, skippedCooldown, pending, modelMissing: false };
+}
+
+/** Human-readable summary for chat / Inspector. */
+export function formatDispatchAiReviewsResult(result: DispatchAiReviewsResult): string | null {
+  if (!result.pending.length) return null;
+  if (result.modelMissing) {
+    return 'AI 復查未啟動：缺少 ZAI_API_KEY。';
+  }
+  const parts: string[] = [];
+  if (result.started.length) {
+    parts.push(`已啟動復查 ${result.started.join(', ')}（見下方「正在派…」；Inspector 會顯示「復查中」）`);
+  }
+  if (result.skippedInFlight.length) {
+    parts.push(
+      `已在復查中（請稍候，勿重複以為沒反應）：${result.skippedInFlight.join(', ')}`,
+    );
+  }
+  if (result.skippedCooldown.length) {
+    parts.push(
+      `冷卻中略過 ${result.skippedCooldown.join(', ')}（稍後或再點「推進一步」強制重試）`,
+    );
+  }
+  if (!parts.length) {
+    parts.push(`待 AI 復查 ${result.pending.join(', ')}，本輪未派發`);
+  }
+  return parts.join('；');
 }
 
 export function countPendingAiReviews(projectId: string): number {
@@ -301,4 +365,31 @@ export function countPendingAiReviews(projectId: string): number {
 
 export function isAiReviewInFlight(taskId: string): boolean {
   return reviewingTaskIds.has(taskId);
+}
+
+export type AiReviewDebugItem = {
+  taskId: string;
+  title: string;
+  reviewerType: string;
+  reviewStatus: string;
+  inFlight: boolean;
+  cooldownRemainingMs: number;
+};
+
+/** Snapshot of pending agent/orchestrator reviews for Run Inspector. */
+export function listAiReviewDebug(projectId: string): AiReviewDebugItem[] {
+  const now = Date.now();
+  return listProjectTasks(projectId)
+    .filter((t) => isAiReviewPending(t))
+    .map((t) => {
+      const coolUntil = reviewCooldownUntil.get(t.id) ?? 0;
+      return {
+        taskId: t.id,
+        title: t.title,
+        reviewerType: t.review?.reviewer_type ?? 'agent',
+        reviewStatus: t.review?.status ?? 'none',
+        inFlight: reviewingTaskIds.has(t.id),
+        cooldownRemainingMs: Math.max(0, coolUntil - now),
+      };
+    });
 }

@@ -208,6 +208,7 @@ async function runGraphUnlocked(
     const initial = mergeRunIntoState(run);
     if (command) initial.pendingCommand = command;
     await graph.invoke(initial, config);
+    await forceDispatchAiReviewsAfterTick(runId, command);
     return runResult(runId, {
       decisions: listDecisions(run.project_id, 'open').filter((d) => d.run_id === runId),
       tasks: createdTaskIdsFromCheckpoint(getAutoRun(runId).checkpoint),
@@ -233,11 +234,33 @@ async function runGraphUnlocked(
 
   await graph.invoke(input as Parameters<typeof graph.invoke>[0], config);
 
+  await forceDispatchAiReviewsAfterTick(runId, command);
+
   const latest = getAutoRun(runId);
   return runResult(runId, {
     decisions: listDecisions(latest.project_id, 'open').filter((d) => d.run_id === runId),
     tasks: createdTaskIdsFromCheckpoint(latest.checkpoint),
   });
+}
+
+async function forceDispatchAiReviewsAfterTick(
+  runId: string,
+  command?: PendingCommand,
+) {
+  // Explicit user actions only — avoids double-logging on every runner event.
+  if (command?.type !== 'tick' && command?.type !== 'retry_runner') return;
+
+  const { dispatchPendingAiReviews, formatDispatchAiReviewsResult } = await import(
+    './ai-review.js'
+  );
+  const latestForReview = getAutoRun(runId);
+  const result = dispatchPendingAiReviews(latestForReview.project_id, runId, {
+    force: command.type === 'tick',
+  });
+  const summary = formatDispatchAiReviewsResult(result);
+  if (summary) {
+    appendRunMessage(runId, 'system', `[推進] ${summary}`);
+  }
 }
 
 async function runGraph(runId: string, command?: PendingCommand): Promise<TickResult> {
@@ -514,3 +537,4 @@ export function synthesizeProgress(projectId: string, runId: string) {
 }
 
 export { reconcileRunnerFailures };
+export { getRunDebugSnapshot, type RunDebugSnapshot, type BlockedReason } from './debug.js';

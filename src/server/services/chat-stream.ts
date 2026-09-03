@@ -104,6 +104,11 @@ export function subscribeChatStream(
   };
 }
 
+/** 清空本 session 的歷史事件，但保留現有 SSE 訂閱（新一輪對話用）。 */
+export function resetChatStream(sessionId: string) {
+  buffers.set(sessionId, []);
+}
+
 export function clearChatStream(sessionId: string) {
   buffers.delete(sessionId);
   listeners.delete(sessionId);

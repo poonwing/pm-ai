@@ -8,6 +8,7 @@ import {
   appendChatStream,
   updateOrAppendChatStream,
   clearChatStream,
+  resetChatStream,
 } from './chat-stream.js';
 import type { ChatMode, ChatMessage, ChatSession } from '../../shared/schemas.js';
 
@@ -354,6 +355,10 @@ export async function sendChatMessage(
   }
 
   appendMessage(sessionId, 'user', text, 'text');
+
+  // 新一輪開始時清掉上一輪 SSE buffer，避免 client 用 since_seq=0 回放舊回覆，
+  // 讓新的用戶訊息看起來插在舊 agent 回覆上面。
+  resetChatStream(sessionId);
 
   // Mark busy before returning so SSE clients don't race with idle status.
   touchSession(sessionId, {

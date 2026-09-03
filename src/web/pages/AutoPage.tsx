@@ -5,11 +5,274 @@ import {
   projectsApi,
   AutoRun,
   AutoRunMessage,
+  AutoRunDebugSnapshot,
   Decision,
   ReviewPolicy,
   Project,
 } from '../lib/api';
 import { Button, Input, Textarea, Label, Badge } from '../components/ui';
+
+function blockedBadgeClass(reason: string): string {
+  if (reason === 'none' || reason === 'completed') return 'bg-emerald-100 text-emerald-800';
+  if (reason === 'stopped' || reason === 'no_model') return 'bg-red-100 text-red-800';
+  if (
+    reason === 'wait_ai_review' ||
+    reason === 'ai_review_cooldown' ||
+    reason === 'awaiting_human' ||
+    reason === 'awaiting_decision'
+  ) {
+    return 'bg-amber-100 text-amber-900';
+  }
+  return 'bg-zinc-100 text-zinc-800';
+}
+
+function RunInspector({
+  debug,
+  loading,
+  onRefresh,
+  projectId,
+}: {
+  debug: AutoRunDebugSnapshot | null;
+  loading: boolean;
+  onRefresh: () => void;
+  projectId: string;
+}) {
+  const [open, setOpen] = useState(true);
+  const [showJson, setShowJson] = useState(false);
+
+  useEffect(() => {
+    if (!debug) return;
+    if (debug.blockedReason !== 'none' && debug.blockedReason !== 'completed') {
+      setOpen(true);
+    }
+  }, [debug?.blockedReason, debug?.runId]);
+
+  if (!debug && !loading) return null;
+
+  const m = debug?.taskMatrix;
+  const graphNext = debug?.graph.next?.length ? debug.graph.next.join(', ') : '—';
+
+  return (
+    <section className="border border-border rounded-lg p-4 flex flex-col gap-3 bg-zinc-50/80">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2">
+          <h2 className="font-medium text-sm">Run Inspector</h2>
+          {debug && (
+            <Badge className={blockedBadgeClass(debug.blockedReason)}>{debug.blockedReason}</Badge>
+          )}
+          {loading && <span className="text-xs text-muted-foreground">更新中…</span>}
+        </div>
+        <div className="flex gap-2">
+          <Button size="sm" variant="ghost" onClick={onRefresh} disabled={loading}>
+            重新整理
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setOpen((v) => !v)}>
+            {open ? '收合' : '展開'}
+          </Button>
+        </div>
+      </div>
+
+      {debug && (
+        <p className="text-sm text-amber-900/90 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+          {debug.blockedHint}
+        </p>
+      )}
+
+      {debug?.aiReviewActivity && debug.aiReviewActivity.pendingCount > 0 && (
+        <div
+          className={
+            debug.aiReviewActivity.status === 'in_flight'
+              ? 'text-sm border border-violet-300 bg-violet-50 text-violet-950 rounded-md px-3 py-2'
+              : debug.aiReviewActivity.status === 'no_model'
+                ? 'text-sm border border-red-300 bg-red-50 text-red-900 rounded-md px-3 py-2'
+                : 'text-sm border border-amber-300 bg-amber-50 text-amber-950 rounded-md px-3 py-2'
+          }
+        >
+          <div className="font-medium text-xs uppercase tracking-wide mb-1">
+            AI 復查狀態 ·{' '}
+            {debug.aiReviewActivity.status === 'in_flight'
+              ? '復查中'
+              : debug.aiReviewActivity.status === 'cooldown'
+                ? '冷卻中（未在執行）'
+                : debug.aiReviewActivity.status === 'no_model'
+                  ? '無法執行'
+                  : '未在執行（待派發）'}
+          </div>
+          <p>{debug.aiReviewActivity.summary}</p>
+          <p className="text-xs mt-1 opacity-80">
+            in-flight {debug.aiReviewActivity.inFlightCount} · ready{' '}
+            {debug.aiReviewActivity.readyCount} · cooldown{' '}
+            {debug.aiReviewActivity.cooldownCount}
+          </p>
+        </div>
+      )}
+
+      {open && debug && (
+        <div className="flex flex-col gap-3 text-sm">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+            <div className="border border-border rounded-md p-2 bg-white">
+              <div className="text-muted-foreground">Run</div>
+              <div className="font-mono truncate">{debug.status} / {debug.phase}</div>
+            </div>
+            <div className="border border-border rounded-md p-2 bg-white">
+              <div className="text-muted-foreground">Graph next</div>
+              <div className="font-mono truncate">{graphNext}</div>
+            </div>
+            <div className="border border-border rounded-md p-2 bg-white">
+              <div className="text-muted-foreground">Interrupt</div>
+              <div className="font-mono">
+                {debug.graph.pendingInterrupt ? 'yes' : 'no'}
+                {!debug.graph.hasGraphState ? ' · no state' : ''}
+              </div>
+            </div>
+            <div className="border border-border rounded-md p-2 bg-white">
+              <div className="text-muted-foreground">ZAI model</div>
+              <div className="font-mono">{debug.modelConfigured ? 'ok' : 'missing key'}</div>
+            </div>
+          </div>
+
+          {m && (
+            <div>
+              <div className="text-xs text-muted-foreground mb-1">任務矩陣</div>
+              <div className="flex flex-wrap gap-1.5 text-xs">
+                <Badge>total {m.total}</Badge>
+                <Badge>todo {m.todo}</Badge>
+                <Badge>in_progress {m.in_progress}</Badge>
+                <Badge>done {m.done}</Badge>
+                <Badge className="bg-amber-100 text-amber-900">
+                  待 AI 復查 {m.pending_ai_review}
+                </Badge>
+                <Badge className="bg-sky-100 text-sky-900">
+                  待人驗收 {m.pending_human_review}
+                </Badge>
+              </div>
+            </div>
+          )}
+
+          {debug.aiReviews.length > 0 && (
+            <div>
+              <div className="text-xs text-muted-foreground mb-1">AI 復查佇列</div>
+              <ul className="flex flex-col gap-1.5">
+                {debug.aiReviews.map((r) => (
+                  <li
+                    key={r.taskId}
+                    className="flex flex-wrap items-center gap-2 text-xs border-b border-border/50 pb-1"
+                  >
+                    <Link
+                      className="underline font-mono"
+                      to={`/projects/${projectId}/tasks/${r.taskId}`}
+                    >
+                      {r.taskId}
+                    </Link>
+                    <span className="truncate max-w-[12rem]">{r.title}</span>
+                    <Badge>{r.reviewerType}/{r.reviewStatus}</Badge>
+                    {r.inFlight ? (
+                      <Badge className="bg-violet-100 text-violet-900">復查中</Badge>
+                    ) : r.cooldownRemainingMs > 0 ? (
+                      <Badge className="bg-amber-100">
+                        冷卻 {Math.ceil(r.cooldownRemainingMs / 1000)}s
+                      </Badge>
+                    ) : (
+                      <Badge className="bg-zinc-200">未派發</Badge>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div>
+            <div className="text-xs text-muted-foreground mb-1">
+              Runner（active {debug.runner.activeCount} · {debug.runner.provider}/
+              {debug.runner.source}
+              {!debug.runner.ready ? ' · not ready' : ''}）
+            </div>
+            {debug.runner.jobs.length === 0 ? (
+              <p className="text-xs text-muted-foreground">本 Run 無關聯 job</p>
+            ) : (
+              <ul className="flex flex-col gap-1">
+                {debug.runner.jobs.slice(0, 8).map((j) => (
+                  <li key={j.id} className="text-xs flex flex-wrap gap-2 items-center">
+                    <code>{j.taskId}</code>
+                    <Badge>{j.status}</Badge>
+                    {j.error && <span className="text-red-600 truncate max-w-sm">{j.error}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {debug.openDecisions.length > 0 && (
+            <div>
+              <div className="text-xs text-muted-foreground mb-1">未關閉決策</div>
+              <ul className="text-xs list-disc pl-4">
+                {debug.openDecisions.map((d) => (
+                  <li key={d.id}>{d.title}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div>
+            <div className="text-xs text-muted-foreground mb-1">Checkpoint 摘要</div>
+            <div className="text-xs font-mono bg-white border border-border rounded-md p-2 space-y-0.5">
+              <div>research_done: {String(debug.checkpoint.research_done)}</div>
+              <div>clarified: {String(debug.checkpoint.clarified)}</div>
+              <div>plan_tasks: {debug.checkpoint.plan_task_count ?? '—'}</div>
+              <div>
+                created_task_ids: {debug.checkpoint.created_task_ids.join(', ') || '—'}
+              </div>
+              {debug.checkpoint.research_task_id && (
+                <div>research_task_id: {debug.checkpoint.research_task_id}</div>
+              )}
+            </div>
+          </div>
+
+          {debug.tasks.filter((t) => t.pendingReview || t.status !== 'done').length > 0 && (
+            <div>
+              <div className="text-xs text-muted-foreground mb-1">任務明細（非全完成 / 待審）</div>
+              <ul className="flex flex-col gap-1 max-h-40 overflow-y-auto">
+                {debug.tasks
+                  .filter((t) => t.pendingReview || t.status !== 'done')
+                  .map((t) => (
+                    <li key={t.id} className="text-xs flex flex-wrap gap-2 items-center">
+                      <Link
+                        className="underline font-mono"
+                        to={`/projects/${projectId}/tasks/${t.id}`}
+                      >
+                        {t.id}
+                      </Link>
+                      <Badge>{t.status}</Badge>
+                      {t.pendingReview && (
+                        <Badge className="bg-amber-100">
+                          {t.reviewerType}/{t.reviewStatus}
+                        </Badge>
+                      )}
+                      <span className="truncate text-muted-foreground">{t.title}</span>
+                    </li>
+                  ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="ghost" onClick={() => setShowJson((v) => !v)}>
+              {showJson ? '隱藏 raw JSON' : '顯示 raw JSON'}
+            </Button>
+            <span className="text-[10px] text-muted-foreground">
+              {new Date(debug.generatedAt).toLocaleTimeString()}
+            </span>
+          </div>
+          {showJson && (
+            <pre className="text-[10px] max-h-64 overflow-auto bg-white border border-border rounded-md p-2">
+              {JSON.stringify(debug, null, 2)}
+            </pre>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
 
 export function AutoPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -43,6 +306,20 @@ export function AutoPage() {
   const [decisionNotes, setDecisionNotes] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [debug, setDebug] = useState<AutoRunDebugSnapshot | null>(null);
+  const [debugLoading, setDebugLoading] = useState(false);
+
+  const loadDebug = useCallback(async (runId: string) => {
+    setDebugLoading(true);
+    try {
+      const snap = await autoApi.getRunDebug(runId);
+      setDebug(snap);
+    } catch {
+      /* keep previous snapshot */
+    } finally {
+      setDebugLoading(false);
+    }
+  }, []);
 
   const load = useCallback(async () => {
     if (!projectId) return;
@@ -74,14 +351,16 @@ export function AutoPage() {
       const detail = await autoApi.getRun(active.id);
       setMessages(detail.messages);
       setDecisions(detail.decisions?.length ? detail.decisions : openDec);
+      void loadDebug(active.id);
       if (!live) {
         setGoal((g) => g.trim() || active.goal || '');
       }
     } else {
       setActiveRunId(null);
       setMessages([]);
+      setDebug(null);
     }
-  }, [projectId]);
+  }, [projectId, loadDebug]);
 
   useEffect(() => {
     load().catch((e) => setError(e instanceof Error ? e.message : '載入失敗'));
@@ -113,16 +392,18 @@ export function AutoPage() {
             setMessages(detail.messages);
           })
           .catch(() => undefined);
+        void loadDebug(activeRunId);
       }
     }, 4000);
     return () => clearInterval(t);
-  }, [projectId, activeRunId, runnerJobs]);
+  }, [projectId, activeRunId, runnerJobs, loadDebug]);
 
   const refreshRun = async (runId: string) => {
     const detail = await autoApi.getRun(runId);
     setMessages(detail.messages);
     setDecisions(detail.decisions);
     setRuns(await autoApi.listRuns(projectId!));
+    await loadDebug(runId);
   };
 
   const start = async () => {
@@ -250,7 +531,7 @@ export function AutoPage() {
   };
 
   return (
-    <div className="flex flex-col gap-6 max-w-3xl">
+    <div className="flex flex-col gap-6 max-w-4xl">
       <div>
         <h1 className="text-xl font-semibold">Auto 工作台</h1>
         <p className="text-sm text-muted-foreground mt-1">
@@ -260,6 +541,14 @@ export function AutoPage() {
 
       {error && <p className="text-sm text-red-600">{error}</p>}
 
+      {activeRunId && projectId && (
+        <RunInspector
+          debug={debug}
+          loading={debugLoading}
+          projectId={projectId}
+          onRefresh={() => void loadDebug(activeRunId)}
+        />
+      )}
       <section className="border border-border rounded-lg p-4 flex flex-col gap-3">
         <div className="flex items-center justify-between">
           <h2 className="font-medium text-sm">運行模式</h2>

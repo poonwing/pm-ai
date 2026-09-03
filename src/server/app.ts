@@ -1009,6 +1009,14 @@ app.get('/api/v1/runs/:id', authMiddleware('any'), (c) => {
   }
 });
 
+app.get('/api/v1/runs/:id/debug', authMiddleware('any'), async (c) => {
+  try {
+    return c.json(await orchestrator.getRunDebugSnapshot(requireParam(c, 'id')));
+  } catch (err) {
+    return errorResponse(c, err);
+  }
+});
+
 app.post('/api/v1/runs/:id/pause', authMiddleware('human'), (c) => {
   try {
     return c.json(autoService.pauseAutoRun(requireParam(c, 'id')));

@@ -3,7 +3,11 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { spawn, type ChildProcess } from 'child_process';
-import { createOpencodeClient, type Part } from '@opencode-ai/sdk';
+import {
+  createOpencodeClient,
+  type Event,
+  type Part,
+} from '@opencode-ai/sdk';
 import { ensureOpenCodeCliOnPath, OPENCODE_CLI_INSTALL_HINT } from './opencode-cli.js';
 import { getOpenCodeRunnerConfig } from './types.js';
 import { isZhipuTransientNetworkError } from '../orchestrator/model.js';
@@ -16,6 +20,121 @@ export interface OpenCodeRunOutcome {
   resultText?: string;
   error?: string;
   durationMs?: number;
+}
+
+type StreamOnLog = (kind: RunnerLogKind, text: string) => void;
+
+/** 累積 streaming delta，合併成完整段落再輸出（對齊 Cursor runner） */
+class StreamLogSink {
+  private assistantBuf = '';
+  private thinkingBuf = '';
+  private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private seenToolCalls = new Set<string>();
+
+  constructor(private onLog?: StreamOnLog) {}
+
+  private scheduleFlush() {
+    if (this.debounceTimer) return;
+    this.debounceTimer = setTimeout(() => {
+      this.debounceTimer = null;
+      this.flushAssistant(false);
+      this.flushThinking(false);
+    }, 400);
+  }
+
+  private cancelDebounce() {
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
+    }
+  }
+
+  private flushAssistant(final = true) {
+    const text = this.assistantBuf.trim();
+    if (text) this.onLog?.('assistant', text);
+    if (final) this.assistantBuf = '';
+  }
+
+  private flushThinking(final = true) {
+    const text = this.thinkingBuf.trim();
+    if (text) this.onLog?.('thinking', text);
+    if (final) this.thinkingBuf = '';
+  }
+
+  flushAll() {
+    this.cancelDebounce();
+    this.flushAssistant(true);
+    this.flushThinking(true);
+  }
+
+  setAssistant(text: string) {
+    if (!text) return;
+    if (this.thinkingBuf) {
+      this.cancelDebounce();
+      this.flushThinking(true);
+    }
+    this.assistantBuf = text;
+    this.scheduleFlush();
+  }
+
+  appendAssistant(delta: string) {
+    if (!delta) return;
+    if (this.thinkingBuf) {
+      this.cancelDebounce();
+      this.flushThinking(true);
+    }
+    this.assistantBuf += delta;
+    this.scheduleFlush();
+  }
+
+  setThinking(text: string) {
+    if (!text) return;
+    if (this.assistantBuf) {
+      this.cancelDebounce();
+      this.flushAssistant(true);
+    }
+    this.thinkingBuf = text;
+    this.scheduleFlush();
+  }
+
+  appendThinking(delta: string) {
+    if (!delta) return;
+    if (this.assistantBuf) {
+      this.cancelDebounce();
+      this.flushAssistant(true);
+    }
+    this.thinkingBuf += delta;
+    this.scheduleFlush();
+  }
+
+  emitTool(name: string, callId?: string) {
+    const key = callId || name;
+    if (this.seenToolCalls.has(key)) return;
+    this.seenToolCalls.add(key);
+    this.flushAll();
+    this.onLog?.('tool', `🔧 ${name}`);
+  }
+
+  emitToolDone(name: string, detail?: string) {
+    this.flushAll();
+    const suffix = detail?.trim() ? ` — ${detail.trim().slice(0, 200)}` : '';
+    this.onLog?.('tool', `✓ ${name}${suffix}`);
+  }
+
+  emitToolError(name: string, error: string) {
+    this.flushAll();
+    this.onLog?.('error', `${name} 失敗：${error.slice(0, 500)}`);
+  }
+
+  emitSystem(text: string) {
+    this.flushAll();
+    this.onLog?.('system', text);
+  }
+
+  emitError(text: string) {
+    this.flushAll();
+    this.onLog?.('error', text);
+  }
 }
 
 async function allocatePort(): Promise<number> {
@@ -45,6 +164,190 @@ function extractText(parts: Part[] | undefined): string {
     .filter(Boolean)
     .join('\n')
     .trim();
+}
+
+function eventSessionId(event: Event): string | undefined {
+  const props = 'properties' in event ? (event.properties as Record<string, unknown>) : undefined;
+  if (!props) return undefined;
+  if (typeof props.sessionID === 'string') return props.sessionID;
+  const part = props.part;
+  if (part && typeof part === 'object' && 'sessionID' in part) {
+    const sid = (part as { sessionID?: unknown }).sessionID;
+    if (typeof sid === 'string') return sid;
+  }
+  const info = props.info;
+  if (info && typeof info === 'object' && 'id' in info && event.type.startsWith('session.')) {
+    const id = (info as { id?: unknown }).id;
+    if (typeof id === 'string') return id;
+  }
+  return undefined;
+}
+
+function handleOpenCodePart(
+  part: Part,
+  delta: string | undefined,
+  sink: StreamLogSink,
+  assistantMsgIds: Set<string>,
+  userMsgIds: Set<string>,
+  pendingText: Map<string, string>,
+) {
+  if (part.type === 'text') {
+    if (part.synthetic) return;
+    if (userMsgIds.has(part.messageID)) {
+      pendingText.delete(part.messageID);
+      return;
+    }
+
+    if (assistantMsgIds.has(part.messageID)) {
+      pendingText.delete(part.messageID);
+      if (typeof delta === 'string' && delta.length > 0) {
+        sink.appendAssistant(delta);
+      } else if (part.text) {
+        sink.setAssistant(part.text);
+      }
+      return;
+    }
+
+    // 尚不知 role：先緩存，等 message.updated 確認是 assistant 再開閘
+    if (typeof delta === 'string' && delta.length > 0) {
+      pendingText.set(part.messageID, (pendingText.get(part.messageID) ?? '') + delta);
+    } else if (part.text) {
+      pendingText.set(part.messageID, part.text);
+    }
+    return;
+  }
+
+  if (part.type === 'reasoning') {
+    if (typeof delta === 'string' && delta.length > 0) {
+      sink.appendThinking(delta);
+    } else if (part.text) {
+      sink.setThinking(part.text);
+    }
+    return;
+  }
+
+  if (part.type === 'tool') {
+    const name = part.tool || 'tool';
+    const state = part.state;
+    if (state.status === 'pending' || state.status === 'running') {
+      sink.emitTool(name, part.callID);
+    } else if (state.status === 'completed') {
+      sink.emitTool(name, part.callID);
+      sink.emitToolDone(name, state.title || undefined);
+    } else if (state.status === 'error') {
+      sink.emitTool(name, part.callID);
+      sink.emitToolError(name, state.error || 'unknown');
+    }
+    return;
+  }
+
+  if (part.type === 'patch' && part.files?.length) {
+    sink.emitSystem(`已修改：${part.files.slice(0, 8).join(', ')}`);
+    return;
+  }
+
+  if (part.type === 'retry') {
+    sink.emitSystem(`模型重試 #${part.attempt}…`);
+  }
+}
+
+function handleOpenCodeEvent(
+  event: Event,
+  sessionId: string,
+  sink: StreamLogSink,
+  assistantMsgIds: Set<string>,
+  userMsgIds: Set<string>,
+  pendingText: Map<string, string>,
+) {
+  // Isolated server 只有我們一個 session；file.edited 無 sessionID，仍顯示。
+  const sid = eventSessionId(event);
+  if (sid && sid !== sessionId) return;
+
+  switch (event.type) {
+    case 'message.updated': {
+      const info = event.properties.info;
+      if (info.role === 'assistant') {
+        assistantMsgIds.add(info.id);
+        const buffered = pendingText.get(info.id);
+        if (buffered) {
+          pendingText.delete(info.id);
+          sink.setAssistant(buffered);
+        }
+      } else if (info.role === 'user') {
+        userMsgIds.add(info.id);
+        pendingText.delete(info.id);
+      }
+      return;
+    }
+    case 'message.part.updated': {
+      handleOpenCodePart(
+        event.properties.part,
+        event.properties.delta,
+        sink,
+        assistantMsgIds,
+        userMsgIds,
+        pendingText,
+      );
+      return;
+    }
+    case 'file.edited': {
+      sink.emitSystem(`已編輯：${event.properties.file}`);
+      return;
+    }
+    case 'session.status': {
+      const status = event.properties.status;
+      if (status.type === 'retry') {
+        sink.emitSystem(`重試中（#${status.attempt}）：${status.message}`);
+      }
+      return;
+    }
+    case 'session.error': {
+      const err = event.properties.error as
+        | { message?: string; name?: string; data?: { message?: string } }
+        | undefined;
+      const msg = err?.data?.message || err?.message || err?.name || 'OpenCode session 錯誤';
+      sink.emitError(msg);
+      return;
+    }
+    case 'session.idle':
+      sink.flushAll();
+      return;
+    default:
+      return;
+  }
+}
+
+async function consumeOpenCodeEventStream(input: {
+  stream: AsyncIterable<Event>;
+  sessionId: string;
+  signal?: AbortSignal;
+  sink: StreamLogSink;
+}): Promise<void> {
+  const assistantMsgIds = new Set<string>();
+  const userMsgIds = new Set<string>();
+  const pendingText = new Map<string, string>();
+  try {
+    for await (const event of input.stream) {
+      if (input.signal?.aborted) break;
+      handleOpenCodeEvent(
+        event,
+        input.sessionId,
+        input.sink,
+        assistantMsgIds,
+        userMsgIds,
+        pendingText,
+      );
+    }
+  } catch (err) {
+    if (input.signal?.aborted) return;
+    // SSE 結束／伺服器關閉屬預期；其他錯誤僅記一筆，不讓主流程失敗
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/aborted|abort|ECONNRESET|socket hang up/i.test(msg)) {
+      input.sink.emitSystem(`事件流結束：${msg.slice(0, 200)}`);
+    }
+  } finally {
+    input.sink.flushAll();
+  }
 }
 
 function buildOpenCodeConfig() {
@@ -155,6 +458,24 @@ export async function runOpenCodePrompt(input: {
     sessionId = created.data.id;
     log('system', `OpenCode session 已建立：${sessionId}`);
 
+    const sink = new StreamLogSink(input.onLog);
+    const streamAc = new AbortController();
+    const onParentAbort = () => streamAc.abort();
+    input.signal?.addEventListener('abort', onParentAbort, { once: true });
+
+    // 先訂閱 SSE，再發 prompt，避免漏掉早期 tool / text 事件
+    log('system', '正在訂閱 OpenCode 事件流…');
+    const sub = await client.event.subscribe({
+      query: { directory: input.cwd },
+      signal: streamAc.signal,
+    });
+    const eventsTask = consumeOpenCodeEventStream({
+      stream: sub.stream,
+      sessionId,
+      signal: streamAc.signal,
+      sink,
+    });
+
     log('system', '正在發送任務 prompt…');
     const maxPromptAttempts = Math.max(
       1,
@@ -163,98 +484,109 @@ export async function runOpenCodePrompt(input: {
     let prompted: Awaited<ReturnType<typeof client.session.prompt>> | null = null;
     let lastPromptError = '';
 
-    for (let attempt = 1; attempt <= maxPromptAttempts; attempt++) {
-      if (input.signal?.aborted) break;
-      prompted = await client.session.prompt({
-        path: { id: sessionId },
-        query: { directory: input.cwd },
-        body: {
-          model: { providerID: cfg.providerId, modelID: cfg.modelId },
-          parts: [{ type: 'text', text: input.prompt }],
-        },
-      });
+    try {
+      for (let attempt = 1; attempt <= maxPromptAttempts; attempt++) {
+        if (input.signal?.aborted) break;
+        prompted = await client.session.prompt({
+          path: { id: sessionId },
+          query: { directory: input.cwd },
+          body: {
+            model: { providerID: cfg.providerId, modelID: cfg.modelId },
+            parts: [{ type: 'text', text: input.prompt }],
+          },
+        });
 
-      if (input.signal?.aborted) break;
+        if (input.signal?.aborted) break;
 
-      const promptErr = (prompted as { error?: { message?: string }; data?: unknown }).error;
-      if (promptErr || !prompted.data) {
-        lastPromptError = promptErr?.message ?? 'OpenCode session.prompt 失败';
-        if (attempt < maxPromptAttempts && isZhipuTransientNetworkError(lastPromptError)) {
-          log(
-            'system',
-            `智譜暫態網絡錯誤，重試 prompt ${attempt + 1}/${maxPromptAttempts}…`,
-          );
-          await new Promise((r) => setTimeout(r, 800 * attempt));
-          continue;
+        const promptErr = (prompted as { error?: { message?: string }; data?: unknown }).error;
+        if (promptErr || !prompted.data) {
+          lastPromptError = promptErr?.message ?? 'OpenCode session.prompt 失败';
+          if (attempt < maxPromptAttempts && isZhipuTransientNetworkError(lastPromptError)) {
+            log(
+              'system',
+              `智譜暫態網絡錯誤，重試 prompt ${attempt + 1}/${maxPromptAttempts}…`,
+            );
+            await new Promise((r) => setTimeout(r, 800 * attempt));
+            continue;
+          }
+          return {
+            ok: false,
+            status: 'error',
+            runId: sessionId,
+            error: lastPromptError,
+            durationMs: Date.now() - started,
+          };
         }
+
+        const info = prompted.data.info;
+        if (info.error) {
+          const errObj = info.error as {
+            message?: string;
+            name?: string;
+            data?: { message?: string };
+          };
+          lastPromptError =
+            errObj.message || errObj.data?.message || errObj.name || 'OpenCode 执行错误';
+          if (attempt < maxPromptAttempts && isZhipuTransientNetworkError(lastPromptError)) {
+            log(
+              'system',
+              `智譜暫態網絡錯誤（${lastPromptError.slice(0, 80)}），重試 prompt ${attempt + 1}/${maxPromptAttempts}…`,
+            );
+            await new Promise((r) => setTimeout(r, 800 * attempt));
+            continue;
+          }
+          return {
+            ok: false,
+            status: 'error',
+            runId: sessionId,
+            error: lastPromptError,
+            durationMs: Date.now() - started,
+          };
+        }
+
+        lastPromptError = '';
+        break;
+      }
+
+      if (input.signal?.aborted) {
         return {
           ok: false,
-          status: 'error',
+          status: 'cancelled',
           runId: sessionId,
-          error: lastPromptError,
+          error: '已取消',
           durationMs: Date.now() - started,
         };
       }
 
-      const info = prompted.data.info;
-      if (info.error) {
-        const errObj = info.error as {
-          message?: string;
-          name?: string;
-          data?: { message?: string };
-        };
-        lastPromptError =
-          errObj.message || errObj.data?.message || errObj.name || 'OpenCode 执行错误';
-        if (attempt < maxPromptAttempts && isZhipuTransientNetworkError(lastPromptError)) {
-          log(
-            'system',
-            `智譜暫態網絡錯誤（${lastPromptError.slice(0, 80)}），重試 prompt ${attempt + 1}/${maxPromptAttempts}…`,
-          );
-          await new Promise((r) => setTimeout(r, 800 * attempt));
-          continue;
-        }
+      if (!prompted?.data || lastPromptError) {
         return {
           ok: false,
           status: 'error',
           runId: sessionId,
-          error: lastPromptError,
+          error: lastPromptError || 'OpenCode session.prompt 失败',
           durationMs: Date.now() - started,
         };
       }
 
-      lastPromptError = '';
-      break;
-    }
-
-    if (input.signal?.aborted) {
+      sink.flushAll();
+      const text = extractText(prompted.data.parts) || 'OpenCode 执行完成';
+      // 若事件流已推過 assistant 文字，仍再推一次完整結果，方便 updateOrAppend 對齊最終版
+      if (text) log('assistant', text);
       return {
-        ok: false,
-        status: 'cancelled',
+        ok: true,
+        status: 'finished',
         runId: sessionId,
-        error: '已取消',
+        resultText: text.slice(0, 8000),
         durationMs: Date.now() - started,
       };
+    } finally {
+      streamAc.abort();
+      input.signal?.removeEventListener('abort', onParentAbort);
+      await Promise.race([
+        eventsTask.catch(() => undefined),
+        new Promise((r) => setTimeout(r, 1500)),
+      ]);
     }
-
-    if (!prompted?.data || lastPromptError) {
-      return {
-        ok: false,
-        status: 'error',
-        runId: sessionId,
-        error: lastPromptError || 'OpenCode session.prompt 失败',
-        durationMs: Date.now() - started,
-      };
-    }
-
-    const text = extractText(prompted.data.parts) || 'OpenCode 执行完成';
-    if (text) log('assistant', text);
-    return {
-      ok: true,
-      status: 'finished',
-      runId: sessionId,
-      resultText: text.slice(0, 8000),
-      durationMs: Date.now() - started,
-    };
   } catch (err) {
     if (input.signal?.aborted) {
       return {

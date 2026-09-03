@@ -651,6 +651,112 @@ export interface AutoRunMessage {
   at: string;
 }
 
+export type AutoBlockedReason =
+  | 'none'
+  | 'stopped'
+  | 'completed'
+  | 'paused'
+  | 'awaiting_human'
+  | 'awaiting_decision'
+  | 'wait_runner'
+  | 'wait_ai_review'
+  | 'ai_review_cooldown'
+  | 'no_model'
+  | 'wait_events'
+  | 'unknown';
+
+export interface AutoRunDebugSnapshot {
+  runId: string;
+  projectId: string;
+  goal: string;
+  status: string;
+  phase: string;
+  threadId: string;
+  modelConfigured: boolean;
+  blockedReason: AutoBlockedReason;
+  blockedHint: string;
+  graph: {
+    hasGraphState: boolean;
+    pendingInterrupt: boolean;
+    next: string[];
+    tasks: Array<{ id: string; name: string; interruptCount: number }>;
+    values: {
+      phase: string | null;
+      status: string | null;
+      pendingCommand: unknown;
+      stopRequested: boolean;
+      skipClarify: boolean;
+      forceReplan: boolean;
+      halt: boolean;
+      createdTaskIds: string[];
+    } | null;
+    error?: string;
+  };
+  taskMatrix: {
+    total: number;
+    draft: number;
+    todo: number;
+    in_progress: number;
+    done: number;
+    cancelled: number;
+    pending_ai_review: number;
+    pending_human_review: number;
+  };
+  tasks: Array<{
+    id: string;
+    title: string;
+    status: string;
+    reviewerType: string | null;
+    reviewStatus: string | null;
+    humanReviewed: boolean;
+    pendingReview: boolean;
+  }>;
+  aiReviews: Array<{
+    taskId: string;
+    title: string;
+    reviewerType: string;
+    reviewStatus: string;
+    inFlight: boolean;
+    cooldownRemainingMs: number;
+  }>;
+  aiReviewActivity: {
+    status: 'none' | 'in_flight' | 'cooldown' | 'idle_pending' | 'no_model';
+    summary: string;
+    inFlightCount: number;
+    cooldownCount: number;
+    readyCount: number;
+    pendingCount: number;
+  };
+  runner: {
+    provider: string;
+    source: string;
+    configured: boolean;
+    ready: boolean;
+    activeCount: number;
+    jobs: Array<{
+      id: string;
+      taskId: string;
+      status: string;
+      provider: string | null;
+      agentName: string;
+      error: string | null;
+      updatedAt: string;
+    }>;
+  };
+  openDecisions: Array<{ id: string; title: string; status: string }>;
+  checkpoint: {
+    research_done: boolean;
+    research_task_id: string | null;
+    skip_clarify_after_research: boolean;
+    clarified: boolean;
+    created_task_ids: string[];
+    plan_task_count: number | null;
+    runner_retry_counts: Record<string, number>;
+    runner_stall_notified: string[];
+  };
+  generatedAt: string;
+}
+
 export interface Decision {
   id: string;
   project_id: string;
@@ -719,6 +825,7 @@ export const autoApi = {
     ),
   getRun: (runId: string) =>
     api<{ run: AutoRun; messages: AutoRunMessage[]; decisions: Decision[] }>(`/runs/${runId}`),
+  getRunDebug: (runId: string) => api<AutoRunDebugSnapshot>(`/runs/${runId}/debug`),
   message: (runId: string, message: string) =>
     api<{ run: AutoRun; messages: AutoRunMessage[]; decisions?: Decision[] }>(
       `/runs/${runId}/message`,
