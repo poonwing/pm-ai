@@ -553,15 +553,18 @@ export function AutoPage() {
   };
 
   const send = async () => {
-    if (!activeRunId || !chat.trim()) return;
+    if (!activeRunId || !chat.trim() || busy) return;
+    const text = chat.trim();
+    setChat('');
     setBusy(true);
+    setError('');
     try {
-      const result = await autoApi.message(activeRunId, chat.trim());
+      const result = await autoApi.message(activeRunId, text);
       setMessages(result.messages);
       setDecisions(result.decisions ?? []);
-      setChat('');
       await refreshRun(activeRunId);
     } catch (e) {
+      setChat(text);
       setError(e instanceof Error ? e.message : '發送失敗');
     } finally {
       setBusy(false);
