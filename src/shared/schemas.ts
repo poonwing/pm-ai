@@ -618,7 +618,9 @@ export const ChatMessageSchema = z.object({
   session_id: z.string(),
   role: z.enum(['user', 'assistant', 'system']),
   content: z.string(),
-  kind: z.enum(['text', 'system', 'tool', 'thinking', 'error']).default('text'),
+  kind: z
+    .enum(['text', 'system', 'tool', 'thinking', 'error', 'question'])
+    .default('text'),
   at: z.string(),
 });
 
@@ -629,7 +631,7 @@ export const ChatSessionSchema = z.object({
   project_id: z.string(),
   title: z.string(),
   mode: z.enum(CHAT_MODES),
-  status: z.enum(['idle', 'streaming', 'running', 'error']),
+  status: z.enum(['idle', 'streaming', 'running', 'awaiting_user', 'error']),
   provider: z.string().nullable().optional(),
   created_at: z.string(),
   updated_at: z.string(),

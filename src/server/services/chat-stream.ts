@@ -1,4 +1,11 @@
-export type ChatStreamKind = 'system' | 'assistant' | 'tool' | 'thinking' | 'error' | 'status';
+export type ChatStreamKind =
+  | 'system'
+  | 'assistant'
+  | 'tool'
+  | 'thinking'
+  | 'error'
+  | 'status'
+  | 'question';
 
 export interface ChatStreamEvent {
   seq: number;

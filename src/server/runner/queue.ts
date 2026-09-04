@@ -39,8 +39,10 @@ function runPromptForProvider(
     cwd: string;
     taskId: string;
     name?: string;
+    chatSessionId?: string;
     signal?: AbortSignal;
     onLog?: (kind: import('./logs.js').RunnerLogKind, text: string) => void;
+    onAskUser?: (question: string, options?: string[]) => void | Promise<void>;
   },
 ) {
   if (provider === 'pi') {
@@ -48,16 +50,20 @@ function runPromptForProvider(
       prompt: input.prompt,
       cwd: input.cwd,
       taskId: input.taskId,
+      chatSessionId: input.chatSessionId,
       signal: input.signal,
       onLog: input.onLog,
+      onAskUser: input.onAskUser,
     });
   }
   return runCursorSdkPrompt({
     prompt: input.prompt,
     cwd: input.cwd,
     name: input.name ?? `pm-ai-${input.taskId}`,
+    chatSessionId: input.chatSessionId,
     signal: input.signal,
     onLog: input.onLog,
+    onAskUser: input.onAskUser,
   });
 }
 
@@ -658,8 +664,13 @@ async function runChatJob(jobId: string) {
       cwd,
       taskId: job.taskId || `chat-${sessionId.slice(0, 8)}`,
       name: `pm-ai-chat-${sessionId.slice(0, 8)}`,
+      chatSessionId: sessionId,
       signal: controller.signal,
       onLog,
+      onAskUser: async (question, options) => {
+        const { notifyChatAwaitingUser } = await import('../services/chat.js');
+        await notifyChatAwaitingUser(sessionId, question, options);
+      },
     });
 
     job = touch(job, { sdkRunId: outcome.runId ?? null });

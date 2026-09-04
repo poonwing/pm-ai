@@ -14,6 +14,33 @@ function isLiveStatus(status: ChatSession['status'] | undefined) {
   return status === 'streaming' || status === 'running';
 }
 
+function isAwaitingUser(status: ChatSession['status'] | undefined) {
+  return status === 'awaiting_user';
+}
+
+function needsStream(status: ChatSession['status'] | undefined) {
+  return isLiveStatus(status) || isAwaitingUser(status);
+}
+
+/** 是否處於「等用戶回答」：以 status 為準，並用 question 訊息/live 作兜底 */
+function detectAwaitingUser(input: {
+  status: ChatSession['status'] | undefined;
+  messages: ChatMessage[];
+  liveLines: ChatStreamEvent[];
+}) {
+  if (isAwaitingUser(input.status)) return true;
+  if (input.liveLines.some((e) => e.kind === 'question')) return true;
+  // 最後一則已落庫訊息是提問，且本輪尚未結束
+  const last = input.messages[input.messages.length - 1];
+  if (
+    last?.kind === 'question' &&
+    (input.status === 'running' || input.status === 'awaiting_user')
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export function ChatPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -72,7 +99,6 @@ export function ChatPage() {
       const controller = new AbortController();
       streamAbortRef.current = controller;
       attachedStreamRef.current = sessionId;
-      setBusy(true);
       setError('');
       setLiveLines([]);
 
@@ -96,11 +122,39 @@ export function ChatPage() {
             setSessions((prev) =>
               prev.map((s) => (s.id === data.session.id ? data.session : s)),
             );
-            if (isLiveStatus(data.session.status)) setBusy(true);
+            if (isAwaitingUser(data.session.status)) {
+              setBusy(false);
+            } else if (isLiveStatus(data.session.status)) {
+              setBusy(true);
+            } else {
+              setBusy(false);
+            }
           },
           onEvent: (entry) => {
             if (controller.signal.aborted) return;
-            if (entry.kind === 'status') return;
+            if (entry.kind === 'status') {
+              const nextStatus = entry.text as ChatSession['status'];
+              setSessions((prev) =>
+                prev.map((s) => (s.id === sessionId ? { ...s, status: nextStatus } : s)),
+              );
+              if (nextStatus === 'awaiting_user' || nextStatus === 'idle' || nextStatus === 'error') {
+                setBusy(false);
+              } else if (nextStatus === 'running' || nextStatus === 'streaming') {
+                setBusy(true);
+              }
+              return;
+            }
+            if (entry.kind === 'question') {
+              // 提問事件一到就解鎖輸入（不依賴 status 是否已更新）
+              setBusy(false);
+              setSessions((prev) =>
+                prev.map((s) =>
+                  s.id === sessionId && s.status === 'running'
+                    ? { ...s, status: 'awaiting_user' }
+                    : s,
+                ),
+              );
+            }
             setLiveLines((prev) => {
               const last = prev[prev.length - 1];
               if (
@@ -144,7 +198,7 @@ export function ChatPage() {
   // 進入頁面 / 切回進行中的對話：自動重連 SSE（含 buffer 回放）
   useEffect(() => {
     if (!projectId || !activeId) return;
-    if (isLiveStatus(active?.status)) {
+    if (needsStream(active?.status)) {
       startStream(activeId);
     }
   }, [projectId, activeId, active?.status, startStream]);
@@ -165,7 +219,7 @@ export function ChatPage() {
         const first = list[0];
         setActiveId(first.id);
         setMode(first.mode);
-        setBusy(isLiveStatus(first.status));
+        setBusy(isLiveStatus(first.status) || isAwaitingUser(first.status));
         await loadMessages(first.id);
       })
       .catch((e) => setError(e instanceof Error ? e.message : '載入失敗'));
@@ -197,7 +251,8 @@ export function ChatPage() {
       setMode(fresh.mode);
       setBusy(isLiveStatus(fresh.status));
       await loadMessages(id);
-      // running/streaming 時由上面的 effect 自動 startStream
+      // running/streaming/awaiting_user 時由上面的 effect 自動 startStream
+      if (isAwaitingUser(fresh.status)) setBusy(false);
     } catch (e) {
       const s = sessions.find((x) => x.id === id);
       if (s) setMode(s.mode);
@@ -236,6 +291,7 @@ export function ChatPage() {
         setActiveId(next.id);
         setMode(next.mode);
         setBusy(isLiveStatus(next.status));
+        if (isAwaitingUser(next.status)) setBusy(false);
         await loadMessages(next.id);
       } else {
         const created = await chatApi.createSession(projectId, { mode: 'ask' });
@@ -261,7 +317,13 @@ export function ChatPage() {
   };
 
   const send = async () => {
-    if (!projectId || !activeId || !input.trim() || busy) return;
+    if (!projectId || !activeId || !input.trim()) return;
+    const currentlyAwaiting = detectAwaitingUser({
+      status: active?.status,
+      messages,
+      liveLines,
+    });
+    if (busy && !currentlyAwaiting) return;
     setBusy(true);
     setError('');
     const text = input.trim();
@@ -274,14 +336,25 @@ export function ChatPage() {
         const others = prev.filter((s) => s.id !== result.session.id);
         return [result.session, ...others];
       });
-      startStream(activeId);
+      if (needsStream(result.session.status)) {
+        startStream(activeId);
+      } else {
+        setBusy(false);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : '傳送失敗');
       setBusy(false);
     }
   };
 
-  const isLive = busy || isLiveStatus(active?.status);
+  const awaiting = detectAwaitingUser({
+    status: active?.status,
+    messages,
+    liveLines,
+  });
+  // 等回答時必須可輸入；其餘 running/streaming/busy 才鎖定
+  const inputLocked = !activeId || (!awaiting && (busy || isLiveStatus(active?.status)));
+  const sessionBusy = inputLocked || awaiting;
 
   return (
     <div className="flex flex-col gap-3 -m-6 p-6" style={{ height: 'calc(100vh - 3rem)' }}>
@@ -296,7 +369,7 @@ export function ChatPage() {
           <Button
             size="sm"
             variant={mode === 'ask' ? 'default' : 'ghost'}
-            disabled={isLive}
+            disabled={sessionBusy}
             onClick={() => switchMode('ask')}
           >
             Ask
@@ -304,12 +377,12 @@ export function ChatPage() {
           <Button
             size="sm"
             variant={mode === 'agent' ? 'default' : 'ghost'}
-            disabled={isLive}
+            disabled={sessionBusy}
             onClick={() => switchMode('agent')}
           >
             Agent
           </Button>
-          <Button size="sm" variant="outline" disabled={busy} onClick={createSession}>
+          <Button size="sm" variant="outline" disabled={sessionBusy} onClick={createSession}>
             新對話
           </Button>
         </div>
@@ -348,7 +421,7 @@ export function ChatPage() {
               size="sm"
               variant="ghost"
               className="mt-auto text-red-600"
-              disabled={isLive}
+              disabled={sessionBusy}
               onClick={() => void removeSession(activeId)}
             >
               刪除此對話
@@ -381,14 +454,16 @@ export function ChatPage() {
                       ? 'bg-zinc-900 text-zinc-50'
                       : m.kind === 'error'
                         ? 'bg-red-50 text-red-800 border border-red-200'
-                        : m.role === 'system'
-                          ? 'bg-amber-50 text-amber-900 border border-amber-200'
-                          : 'bg-zinc-100 text-zinc-900'
+                        : m.kind === 'question'
+                          ? 'bg-amber-50 text-amber-950 border border-amber-300'
+                          : m.role === 'system'
+                            ? 'bg-amber-50 text-amber-900 border border-amber-200'
+                            : 'bg-zinc-100 text-zinc-900'
                   }`}
                 >
                   <div className="text-[10px] uppercase opacity-60 mb-1">
-                    {m.role}
-                    {m.kind !== 'text' ? ` · ${m.kind}` : ''}
+                    {m.kind === 'question' ? 'agent · 提問' : m.role}
+                    {m.kind !== 'text' && m.kind !== 'question' ? ` · ${m.kind}` : ''}
                   </div>
                   {m.content}
                 </div>
@@ -400,14 +475,18 @@ export function ChatPage() {
                   className={`text-sm whitespace-pre-wrap break-words rounded-md px-3 py-2 max-w-[90%] border border-dashed ${
                     e.kind === 'error'
                       ? 'border-red-300 bg-red-50 text-red-800'
-                      : e.kind === 'thinking'
-                        ? 'border-violet-200 bg-violet-50 text-violet-900'
-                        : e.kind === 'tool'
-                          ? 'border-sky-200 bg-sky-50 text-sky-900'
-                          : 'border-zinc-300 bg-white text-zinc-800'
+                      : e.kind === 'question'
+                        ? 'border-amber-400 bg-amber-50 text-amber-950'
+                        : e.kind === 'thinking'
+                          ? 'border-violet-200 bg-violet-50 text-violet-900'
+                          : e.kind === 'tool'
+                            ? 'border-sky-200 bg-sky-50 text-sky-900'
+                            : 'border-zinc-300 bg-white text-zinc-800'
                   }`}
                 >
-                  <div className="text-[10px] uppercase opacity-60 mb-1">live · {e.kind}</div>
+                  <div className="text-[10px] uppercase opacity-60 mb-1">
+                    {e.kind === 'question' ? 'live · 提問' : `live · ${e.kind}`}
+                  </div>
                   {e.text}
                 </div>
               </div>
@@ -415,14 +494,21 @@ export function ChatPage() {
           </div>
 
           <div className="border-t border-border p-3 flex flex-col gap-2 shrink-0">
+            {awaiting && (
+              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5">
+                Agent 正在等你回答上方問題；回覆後會繼續執行。
+              </p>
+            )}
             <Textarea
               rows={3}
               value={input}
-              disabled={!activeId || isLive}
+              disabled={inputLocked}
               placeholder={
-                mode === 'ask'
-                  ? '問關於這個專案的問題…'
-                  : '描述要 Agent 做的事（會實際改檔）…'
+                awaiting
+                  ? '回答 Agent 的問題…'
+                  : mode === 'ask'
+                    ? '問關於這個專案的問題…'
+                    : '描述要 Agent 做的事（會實際改檔）…'
               }
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
@@ -434,8 +520,11 @@ export function ChatPage() {
             />
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs text-muted-foreground">Ctrl / ⌘ + Enter 傳送</span>
-              <Button onClick={() => void send()} disabled={!activeId || isLive || !input.trim()}>
-                {isLive ? '回覆中…' : '傳送'}
+              <Button
+                onClick={() => void send()}
+                disabled={inputLocked || !input.trim()}
+              >
+                {awaiting ? '回覆並繼續' : inputLocked ? '回覆中…' : '傳送'}
               </Button>
             </div>
           </div>

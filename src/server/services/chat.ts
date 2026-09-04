@@ -10,6 +10,11 @@ import {
   clearChatStream,
   resetChatStream,
 } from './chat-stream.js';
+import {
+  answerChatUserQuestion,
+  cancelPendingChatQuestion,
+  hasPendingChatQuestion,
+} from './chat-user-input.js';
 import type { ChatMode, ChatMessage, ChatSession } from '../../shared/schemas.js';
 
 function now() {
@@ -105,6 +110,7 @@ export function createChatSession(
 
 export function deleteChatSession(projectId: string, sessionId: string) {
   getChatSession(projectId, sessionId);
+  cancelPendingChatQuestion(sessionId, '對話已刪除');
   const db = getDb();
   db.delete(schema.chatMessages).where(eq(schema.chatMessages.sessionId, sessionId)).run();
   db.delete(schema.chatSessions).where(eq(schema.chatSessions.id, sessionId)).run();
@@ -247,6 +253,7 @@ function buildAgentPrompt(
     '',
     '你可以讀寫當前工作目錄內與任務相關的檔案，並執行必要命令。',
     '不要修改 .pm-ai/ 任務帳本（除非用戶明確要求）。',
+    '若需要用戶澄清、選擇或確認，請呼叫 ask_user 工具並等待回覆；不要只在文字裡提問後停住。',
     '完成後用繁體中文簡要說明你做了什麼。',
     '',
     prior ? `—— 近期對話 ——\n${prior}` : '',
@@ -255,6 +262,46 @@ function buildAgentPrompt(
   ]
     .filter(Boolean)
     .join('\n');
+}
+
+/** Runner 透過 ask_user / request 向用戶提問時呼叫 */
+export async function notifyChatAwaitingUser(
+  sessionId: string,
+  question: string,
+  options?: string[],
+) {
+  const row = getDb()
+    .select()
+    .from(schema.chatSessions)
+    .where(eq(schema.chatSessions.id, sessionId))
+    .get();
+  if (!row) return;
+
+  const lines = [question.trim()];
+  if (options?.length) {
+    lines.push('', '選項：');
+    options.forEach((opt, i) => lines.push(`${i + 1}. ${opt}`));
+  }
+  const text = lines.filter(Boolean).join('\n');
+  const msg = appendMessage(sessionId, 'assistant', text, 'question');
+  appendChatStream(sessionId, 'question', text, msg.id);
+  touchSession(sessionId, { status: 'awaiting_user' });
+  appendChatStream(sessionId, 'status', 'awaiting_user', msg.id);
+}
+
+/** 提問結束／失效時清掉 awaiting_user，避免 UI 卡死 */
+export function clearChatAwaitingUser(
+  sessionId: string,
+  nextStatus: 'running' | 'idle' = 'running',
+) {
+  const row = getDb()
+    .select()
+    .from(schema.chatSessions)
+    .where(eq(schema.chatSessions.id, sessionId))
+    .get();
+  if (!row || row.status !== 'awaiting_user') return;
+  touchSession(sessionId, { status: nextStatus });
+  appendChatStream(sessionId, 'status', nextStatus);
 }
 
 async function runAgentTurn(projectId: string, sessionId: string, userText: string) {
@@ -335,12 +382,40 @@ export async function sendChatMessage(
   input: { message: string; mode?: ChatMode },
 ): Promise<{ session: ChatSession; messages: ChatMessage[] }> {
   const session = getChatSession(projectId, sessionId);
+
+  const text = input.message.trim();
+  if (!text) throw new ValidationError('訊息不可為空');
+
+  // Agent 提問中：把本則訊息當回答，恢復 Runner（以 pending 為準，不單看 status）
+  if (hasPendingChatQuestion(sessionId)) {
+    appendMessage(sessionId, 'user', text, 'text');
+    const ok = answerChatUserQuestion(sessionId, text);
+    if (!ok) {
+      throw new ValidationError('目前沒有待回答的問題');
+    }
+    touchSession(sessionId, { status: 'running' });
+    appendChatStream(sessionId, 'status', 'running');
+    appendChatStream(sessionId, 'system', '已收到回覆，Agent 繼續執行…');
+    return {
+      session: getChatSession(projectId, sessionId),
+      messages: listChatMessages(projectId, sessionId),
+    };
+  }
+
   if (session.status === 'streaming' || session.status === 'running') {
     throw new ValidationError('此對話仍在回覆中，請稍候');
   }
 
-  const text = input.message.trim();
-  if (!text) throw new ValidationError('訊息不可為空');
+  // DB 仍是 awaiting_user，但記憶體 pending 已丟（常見於服務熱重載）
+  // → 清掉僵死狀態，把本則當新一輪請求繼續，不再報錯卡住
+  if (session.status === 'awaiting_user') {
+    clearChatAwaitingUser(sessionId, 'idle');
+    appendChatStream(
+      sessionId,
+      'system',
+      '上一輪提問已失效（服務可能已重啟），改以新請求繼續…',
+    );
+  }
 
   const mode = input.mode ?? session.mode;
   if (mode !== session.mode) {

@@ -1,6 +1,10 @@
 import { Agent, CursorAgentError } from '@cursor/sdk';
 import { getCursorRunnerConfig } from './types.js';
 import type { RunnerLogKind } from './logs.js';
+import {
+  cancelPendingChatQuestion,
+  waitForChatUserAnswer,
+} from '../services/chat-user-input.js';
 
 export interface CursorSdkRunOutcome {
   ok: boolean;
@@ -100,7 +104,13 @@ function extractTextDelta(block: { type?: string; text?: string }): string {
   return block.text;
 }
 
-function emitStreamEvent(event: unknown, sink: StreamLogSink) {
+function emitStreamEvent(
+  event: unknown,
+  sink: StreamLogSink,
+  hooks?: {
+    onRequest?: (requestId: string) => void;
+  },
+) {
   if (!event || typeof event !== 'object') return;
   const e = event as Record<string, unknown>;
   const type = String(e.type ?? '');
@@ -135,6 +145,13 @@ function emitStreamEvent(event: unknown, sink: StreamLogSink) {
     return;
   }
 
+  if (type === 'request') {
+    const requestId = typeof e.request_id === 'string' ? e.request_id : 'unknown';
+    sink.emitSystem(`Cursor Agent 正在等待用戶回覆（request: ${requestId}）`);
+    hooks?.onRequest?.(requestId);
+    return;
+  }
+
   if (type === 'system') {
     const text = typeof e.text === 'string' ? e.text : typeof e.message === 'string' ? e.message : '';
     if (text) sink.emitSystem(text);
@@ -142,14 +159,47 @@ function emitStreamEvent(event: unknown, sink: StreamLogSink) {
 }
 
 async function consumeRunStream(
-  run: { stream?: () => AsyncIterable<unknown> },
+  run: {
+    stream?: () => AsyncIterable<unknown>;
+    steer?: (text: string) => Promise<unknown>;
+  },
   onLog?: StreamOnLog,
+  hooks?: {
+    chatSessionId?: string;
+    signal?: AbortSignal;
+    onAskUser?: (question: string, options?: string[]) => void | Promise<void>;
+  },
 ) {
   if (typeof run.stream !== 'function') return;
   const sink = new StreamLogSink(onLog);
+  const chatSessionId = hooks?.chatSessionId?.trim() || '';
+
   try {
     for await (const event of run.stream()) {
-      emitStreamEvent(event, sink);
+      emitStreamEvent(event, sink, {
+        onRequest: (requestId) => {
+          if (!chatSessionId) return;
+          void (async () => {
+            const question = `Cursor Agent 需要你的回覆才能繼續（request: ${requestId}）。請直接在對話中回答。`;
+            try {
+              const answerPromise = waitForChatUserAnswer(chatSessionId, {
+                question,
+                signal: hooks?.signal,
+              });
+              await hooks?.onAskUser?.(question);
+              const answer = await answerPromise;
+              if (typeof run.steer === 'function') {
+                await run.steer(answer);
+              } else {
+                sink.emitSystem('此 Cursor Run 不支援 steer，無法注入回覆；請取消後重試或改用 Pi Runner。');
+              }
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              sink.emitSystem(`用戶未回覆 Cursor 提問：${message}`);
+            }
+          })();
+        },
+      });
     }
   } catch {
     /* stream errors are non-fatal */
@@ -162,8 +212,10 @@ export async function runCursorSdkPrompt(input: {
   prompt: string;
   cwd: string;
   name?: string;
+  chatSessionId?: string;
   signal?: AbortSignal;
   onLog?: StreamOnLog;
+  onAskUser?: (question: string, options?: string[]) => void | Promise<void>;
 }): Promise<CursorSdkRunOutcome> {
   const cfg = getCursorRunnerConfig();
   if (!cfg.apiKey) {
@@ -173,6 +225,8 @@ export async function runCursorSdkPrompt(input: {
   if (input.signal?.aborted) {
     return { ok: false, status: 'cancelled', error: '已取消' };
   }
+
+  const chatSessionId = input.chatSessionId?.trim() || '';
 
   try {
     // Prefer create+send so we can cancel mid-run.
@@ -185,6 +239,7 @@ export async function runCursorSdkPrompt(input: {
 
     const run = await agent.send(input.prompt);
     const onAbort = () => {
+      if (chatSessionId) cancelPendingChatQuestion(chatSessionId, '已取消');
       if (run.supports('cancel')) {
         void run.cancel().catch(() => undefined);
       }
@@ -194,7 +249,11 @@ export async function runCursorSdkPrompt(input: {
     try {
       const [result] = await Promise.all([
         run.wait(),
-        consumeRunStream(run, input.onLog),
+        consumeRunStream(run, input.onLog, {
+          chatSessionId,
+          signal: input.signal,
+          onAskUser: input.onAskUser,
+        }),
       ]);
       if (result.status === 'finished') {
         return {
@@ -223,8 +282,10 @@ export async function runCursorSdkPrompt(input: {
       };
     } finally {
       input.signal?.removeEventListener('abort', onAbort);
+      if (chatSessionId) cancelPendingChatQuestion(chatSessionId, '回合已結束');
     }
   } catch (err) {
+    if (chatSessionId) cancelPendingChatQuestion(chatSessionId, '執行失敗');
     if (err instanceof CursorAgentError) {
       return {
         ok: false,

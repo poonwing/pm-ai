@@ -918,7 +918,7 @@ export interface ChatSession {
   project_id: string;
   title: string;
   mode: ChatMode;
-  status: 'idle' | 'streaming' | 'running' | 'error';
+  status: 'idle' | 'streaming' | 'running' | 'awaiting_user' | 'error';
   provider?: string | null;
   created_at: string;
   updated_at: string;
@@ -929,14 +929,14 @@ export interface ChatMessage {
   session_id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
-  kind: 'text' | 'system' | 'tool' | 'thinking' | 'error';
+  kind: 'text' | 'system' | 'tool' | 'thinking' | 'error' | 'question';
   at: string;
 }
 
 export interface ChatStreamEvent {
   seq: number;
   at: string;
-  kind: 'system' | 'assistant' | 'tool' | 'thinking' | 'error' | 'status';
+  kind: 'system' | 'assistant' | 'tool' | 'thinking' | 'error' | 'status' | 'question';
   text: string;
   messageId?: string;
 }
