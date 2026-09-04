@@ -179,7 +179,46 @@ function buildGraphInvokeCommand(input: {
     });
   }
 
-  // Research Runner finished but graph may still be parked at END after interrupt.
+  // Prefer jumping to the next phase once research is done in DB.
+  // Resuming a stale research interrupt alone can re-park at END if checkpoint lags.
+  if (
+    researchDone &&
+    !isClarified(cp) &&
+    !hydrated.skipClarify &&
+    !checkpointFlag(cp, 'skip_clarify_after_research')
+  ) {
+    return new Command({
+      goto: 'clarify' as const,
+      ...(pendingInterrupt ? { resume: resumePayload } : {}),
+      update: {
+        ...hydrated,
+        pendingCommand: null,
+        status: 'running',
+        phase: 'clarify',
+      },
+    });
+  }
+
+  if (
+    researchDone &&
+    (isClarified(cp) ||
+      hydrated.skipClarify ||
+      checkpointFlag(cp, 'skip_clarify_after_research')) &&
+    !isDesignDone(cp)
+  ) {
+    return new Command({
+      goto: 'design' as const,
+      ...(pendingInterrupt ? { resume: resumePayload } : {}),
+      update: {
+        ...hydrated,
+        pendingCommand: null,
+        status: 'running',
+        phase: 'design',
+      },
+    });
+  }
+
+  // Research Runner still in flight — resume / re-enter research wait.
   if (!researchDone && researchTaskId) {
     return new Command({
       ...(pendingInterrupt ? { resume: resumePayload } : { goto: 'research' as const }),
@@ -187,34 +226,10 @@ function buildGraphInvokeCommand(input: {
     });
   }
 
-  if (
-    researchDone &&
-    !isClarified(cp) &&
-    !hydrated.skipClarify &&
-    !checkpointFlag(cp, 'skip_clarify_after_research') &&
-    (run.phase === 'clarify' || run.phase === 'intake')
-  ) {
-    return new Command({
-      ...(pendingInterrupt ? { resume: resumePayload } : { goto: 'clarify' as const }),
-      update,
-    });
-  }
-
-  if (
-    researchDone &&
-    isClarified(cp) &&
-    !isDesignDone(cp) &&
-    (run.phase === 'design' || run.phase === 'agree_review_policy')
-  ) {
-    return new Command({
-      ...(pendingInterrupt ? { resume: resumePayload } : { goto: 'design' as const }),
-      update,
-    });
-  }
-
   if (checkpointFlag(cp, 'force_redesign')) {
     return new Command({
-      ...(pendingInterrupt ? { resume: resumePayload } : { goto: 'design' as const }),
+      goto: 'design' as const,
+      ...(pendingInterrupt ? { resume: resumePayload } : {}),
       update,
     });
   }
@@ -318,11 +333,14 @@ async function runGraphUnlocked(
   }
 
   // Fast-path: all run work already terminal → complete without depending on graph resume.
+  // Only after dispatch; never on brand-new research/clarify ticks.
   if (
     command?.type === 'tick' ||
     command?.type === 'retry_runner' ||
     (command?.type === 'task_event' &&
-      (command.event === 'cancelled' || command.event === 'runner_completed'))
+      (command.event === 'cancelled' ||
+        command.event === 'runner_completed' ||
+        command.event === 'completed'))
   ) {
     if (tryCompleteRunIfIdle(runId, '檢測到本 Run 已無未完成任務')) {
       return runResult(runId);
@@ -669,7 +687,10 @@ export async function onTaskEvent(projectId: string, taskId: string, event: stri
     (!checkpointFlag(cp, 'research_done') && researchTaskId !== null);
   const shouldResume =
     active.status === 'running' ||
-    (inResearch && (taskId === researchTaskId || event === 'runner_completed'));
+    (inResearch &&
+      (taskId === researchTaskId ||
+        event === 'runner_completed' ||
+        event === 'completed'));
 
   if (shouldResume) {
     return runGraph(active.id, { type: 'task_event', taskId, event });

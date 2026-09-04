@@ -12,7 +12,7 @@ import {
 import type { OrchestratorStateType } from '../state.js';
 import { buildInitialGraphState } from '../state.js';
 import { syncRunMirror } from '../sync.js';
-import { checkpointFlag } from '../helpers.js';
+import { checkpointFlag, isClarified } from '../helpers.js';
 
 function mergeCheckpointFromRun(state: OrchestratorStateType): OrchestratorStateType {
   const run = getAutoRun(state.runId);
@@ -72,7 +72,20 @@ export async function researchNode(
   state: OrchestratorStateType,
 ): Promise<Partial<OrchestratorStateType>> {
   state = mergeCheckpointFromRun(state);
-  if (checkpointFlag(state.checkpoint, 'research_done')) return {};
+  if (checkpointFlag(state.checkpoint, 'research_done')) {
+    const skip =
+      state.skipClarify ||
+      checkpointFlag(state.checkpoint, 'skip_clarify_after_research') ||
+      isClarified(state.checkpoint);
+    const phase = skip ? 'design' : 'clarify';
+    // Propagate checkpoint/phase so routeAfterResearch does not see a stale graph state.
+    return {
+      status: 'running',
+      phase,
+      checkpoint: state.checkpoint,
+      skipClarify: skip,
+    };
+  }
 
   const project = getProject(state.projectId);
   ensureDefaultStaffAgents(state.projectId);
