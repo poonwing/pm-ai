@@ -987,7 +987,6 @@ app.post(
   async (c) => {
     try {
       const projectId = requireParam(c, 'id');
-      taskService.updateProject(projectId, { run_mode: 'auto' });
       const body = c.req.valid('json');
       const result = await orchestrator.startOrchestratorRun(projectId, body.goal);
       return c.json(result, 201);

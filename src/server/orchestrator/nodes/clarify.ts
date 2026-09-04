@@ -114,9 +114,9 @@ export async function clarifyNode(
   state: OrchestratorStateType,
 ): Promise<Partial<OrchestratorStateType>> {
   if (state.skipClarify || isClarified(state.checkpoint)) {
-    const next = { ...state, status: 'running', phase: 'agree_review_policy' };
+    const next = { ...state, status: 'running', phase: 'design' };
     syncRunMirror(next);
-    return { status: 'running', phase: 'agree_review_policy' };
+    return { status: 'running', phase: 'design' };
   }
 
   const project = getProject(state.projectId);

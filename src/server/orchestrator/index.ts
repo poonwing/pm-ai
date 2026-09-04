@@ -12,7 +12,6 @@ import {
 import { ensureDefaultStaffAgents } from '../services/agents.js';
 import {
   listProjectTasks,
-  updateProject,
   ValidationError,
 } from '../services/tasks.js';
 import { getRunnerStatus } from '../runner/index.js';
@@ -29,13 +28,17 @@ import {
   decisionChatHint,
   isClarified,
   isClarifyPhase,
+  isDesignDone,
+  isDesignPhase,
   isExplicitReplanRequest,
+  isRequirementChangeRequest,
   isResearchPhase,
   isRetryRunnerRequest,
   isStartWorkRequest,
   isStatusInquiry,
   isWaitingPhase,
   markClarifiedAndContinue,
+  REQUIREMENT_CHANGE_DECISION_TITLE,
   tryParseDecisionReply,
   collectRunTaskIds,
   evaluateRunProgress,
@@ -43,6 +46,11 @@ import {
 } from './helpers.js';
 import { reconcileRunnerFailures } from './nodes/reconcile-runner.js';
 import { advanceResearchIfTaskDone } from './nodes/research.js';
+import {
+  applyRequirementChangeDecision,
+  cancelRunOpenWork,
+  openRequirementChangeDecision,
+} from './replan.js';
 
 export type { OrchestratorPhase } from './helpers.js';
 
@@ -52,6 +60,7 @@ const tickChains = new Map<string, Promise<unknown>>();
 export type TickOptions = {
   forceReplan?: boolean;
   skipClarify?: boolean;
+  forceRedesign?: boolean;
 };
 
 function stateFromRun(run: ReturnType<typeof getAutoRun>) {
@@ -83,6 +92,7 @@ function mergeRunIntoState(run: ReturnType<typeof getAutoRun>) {
 }
 
 function optsToCommand(opts: TickOptions): PendingCommand | undefined {
+  if (opts.forceRedesign) return { type: 'force_redesign' };
   if (opts.forceReplan) return { type: 'force_replan' };
   if (opts.skipClarify) return { type: 'skip_clarify' };
   return { type: 'tick' };
@@ -158,6 +168,17 @@ function buildGraphInvokeCommand(input: {
     });
   }
 
+  const userDesignTurn =
+    pendingCommand.type === 'user_message' &&
+    (run.phase === 'design' || (!isDesignDone(cp) && isClarified(cp)));
+
+  if (userDesignTurn && isDesignPhase(run.phase)) {
+    return new Command({
+      goto: 'design' as const,
+      update: { ...hydrated, pendingCommand, status: 'running' },
+    });
+  }
+
   // Research Runner finished but graph may still be parked at END after interrupt.
   if (!researchDone && researchTaskId) {
     return new Command({
@@ -175,6 +196,25 @@ function buildGraphInvokeCommand(input: {
   ) {
     return new Command({
       ...(pendingInterrupt ? { resume: resumePayload } : { goto: 'clarify' as const }),
+      update,
+    });
+  }
+
+  if (
+    researchDone &&
+    isClarified(cp) &&
+    !isDesignDone(cp) &&
+    (run.phase === 'design' || run.phase === 'agree_review_policy')
+  ) {
+    return new Command({
+      ...(pendingInterrupt ? { resume: resumePayload } : { goto: 'design' as const }),
+      update,
+    });
+  }
+
+  if (checkpointFlag(cp, 'force_redesign')) {
+    return new Command({
+      ...(pendingInterrupt ? { resume: resumePayload } : { goto: 'design' as const }),
       update,
     });
   }
@@ -207,8 +247,29 @@ function buildGraphInvokeCommand(input: {
 function tryCompleteRunIfIdle(runId: string, reason: string): boolean {
   const run = getAutoRun(runId);
   if (run.status === 'stopped' || run.status === 'completed') return false;
+
+  // Only the post-dispatch execution loop may auto-complete.
+  // Early phases (research/clarify/design/plan) often have zero open tasks and must not end.
+  const phase = run.phase;
+  if (
+    phase !== 'wait_events' &&
+    phase !== 'synthesize' &&
+    phase !== 'assign'
+  ) {
+    return false;
+  }
+
+  // Design / plan not finished → still coordinating, never idle-complete.
+  if (!isDesignDone(run.checkpoint)) return false;
+  if (
+    !createdTaskIdsFromCheckpoint(run.checkpoint).length &&
+    !run.checkpoint.plan
+  ) {
+    return false;
+  }
+
   const progress = evaluateRunProgress(run.project_id, runId);
-  if (!progress.canComplete) return false;
+  if (!progress.canComplete || !progress.scopedToRun) return false;
 
   const detail =
     progress.tasks.length === 0
@@ -406,7 +467,6 @@ async function runGraph(runId: string, command?: PendingCommand): Promise<TickRe
 
 export async function startOrchestratorRun(projectId: string, goal: string) {
   ensureDefaultStaffAgents(projectId);
-  updateProject(projectId, { run_mode: 'auto' });
   const run = createAutoRun(projectId, goal);
   if (isStartWorkRequest(goal)) {
     updateAutoRun(run.id, {
@@ -418,7 +478,7 @@ export async function startOrchestratorRun(projectId: string, goal: string) {
     appendRunMessage(
       run.id,
       'assistant',
-      '偵測到你要求立刻開工：先做 workspace 研究，完成後將跳過需求澄清，進入審查協定與規劃。',
+      '偵測到你要求立刻開工：先做 workspace 研究，完成後將跳過需求澄清，進入設計與規劃。',
     );
     return tickOrchestrator(run.id, { skipClarify: true });
   }
@@ -447,6 +507,16 @@ export async function messageOrchestrator(runId: string, message: string) {
       if (decision.title.includes('Review Policy')) {
         return handlePolicyDecision(decision.id, parsed.optionId);
       }
+      if (decision.title.includes(REQUIREMENT_CHANGE_DECISION_TITLE)) {
+        const action = await applyRequirementChangeDecision(runId, parsed.optionId);
+        if (action === 'redesign') {
+          return runGraph(runId, { type: 'force_redesign' });
+        }
+        if (action === 'replan') {
+          return tickOrchestrator(runId, { forceReplan: true });
+        }
+        return tickOrchestrator(runId);
+      }
       return tickOrchestrator(runId);
     }
     appendRunMessage(runId, 'assistant', decisionChatHint(decision.options));
@@ -470,7 +540,7 @@ export async function messageOrchestrator(runId: string, message: string) {
       appendRunMessage(
         runId,
         'assistant',
-        '已記下。研究員完成後將跳過澄清，直接進入審查協定與規劃。',
+        '已記下。研究員完成後將跳過澄清，直接進入設計與規劃。',
       );
     } else if (isStatusInquiry(message)) {
       appendRunMessage(runId, 'assistant', buildRunStatusSummary(latest.project_id, runId));
@@ -491,7 +561,7 @@ export async function messageOrchestrator(runId: string, message: string) {
     if (isStartWorkRequest(message)) {
       markClarifiedAndContinue(
         runId,
-        '需求對齊結束，開始進入審查協定與規劃…',
+        '需求對齊結束，開始進入設計階段…',
         appendRunMessage,
         updateAutoRun,
         getAutoRun,
@@ -502,6 +572,10 @@ export async function messageOrchestrator(runId: string, message: string) {
   }
 
   latest = getAutoRun(runId);
+
+  if (isDesignPhase(latest.phase) || (!isDesignDone(latest.checkpoint) && isClarified(latest.checkpoint))) {
+    return runGraph(runId, { type: 'user_message', text: message });
+  }
 
   if (isRetryRunnerRequest(message)) {
     appendRunMessage(runId, 'assistant', '收到，正在重新提交失敗的 Runner 任務…');
@@ -525,7 +599,7 @@ export async function messageOrchestrator(runId: string, message: string) {
         appendRunMessage(
           runId,
           'assistant',
-          `有待處理任務 ${pending.map((t) => t.id).join(', ')}，但未能提交 Runner。請確認 Runner 已配置（CURSOR_API_KEY 或 OpenCode），或到任務詳情手動操作。`,
+          `有待處理任務 ${pending.map((t) => t.id).join(', ')}，但未能提交 Runner。請確認 Runner 已配置（CURSOR_API_KEY 或 ZAI_API_KEY / Pi），或到任務詳情手動操作。`,
         );
       }
     }
@@ -534,17 +608,22 @@ export async function messageOrchestrator(runId: string, message: string) {
 
   if (isWaitingPhase(latest.phase)) {
     if (isExplicitReplanRequest(message)) {
-      appendRunMessage(runId, 'assistant', '收到，將依你的補充重新規劃與分派…');
+      appendRunMessage(runId, 'assistant', '收到，將取消未完成任務並依你的補充重新規劃與分派…');
+      await cancelRunOpenWork(runId, { reason: '重新規劃：取消未完成任務' });
       return tickOrchestrator(runId, { forceReplan: true });
     }
     if (isStatusInquiry(message)) {
       appendRunMessage(runId, 'assistant', buildRunStatusSummary(latest.project_id, runId));
       return runResult(runId);
     }
+    if (isRequirementChangeRequest(message)) {
+      await openRequirementChangeDecision(runId, message);
+      return runResult(runId);
+    }
     appendRunMessage(
       runId,
       'assistant',
-      '已記下補充指示（任務仍在執行中，不會自動重規劃）。若要依新指示重新規劃，請回覆「重新規劃」，或點「推進一步」查看進度彙總。',
+      '已記下補充指示（任務仍在執行中，不會自動重規劃）。若要改需求請直接說明變更點（會暫停並請你選擇處理方式），或回覆「重新規劃」／點「推進一步」。',
     );
     return runResult(runId);
   }
@@ -561,6 +640,15 @@ export async function onDecisionResolved(decisionId: string) {
       'system',
       `人類已選擇決策「${d.title}」選項：${d.chosen_option_id}`,
     );
+    if (d.title.includes(REQUIREMENT_CHANGE_DECISION_TITLE) && d.chosen_option_id) {
+      const action = await applyRequirementChangeDecision(d.run_id, d.chosen_option_id);
+      if (action === 'redesign') {
+        return runGraph(d.run_id, { type: 'force_redesign' });
+      }
+      if (action === 'replan') {
+        return tickOrchestrator(d.run_id, { forceReplan: true });
+      }
+    }
     return tickOrchestrator(d.run_id);
   }
   return null;
@@ -623,7 +711,7 @@ export async function handlePolicyDecision(decisionId: string, chosenOptionId: s
     } else {
       upsertReviewPolicy(d.project_id, {}, true);
     }
-    updateAutoRun(d.run_id, { phase: 'plan', status: 'running' });
+    updateAutoRun(d.run_id, { phase: 'design', status: 'running' });
   }
   return tickOrchestrator(d.run_id!);
 }

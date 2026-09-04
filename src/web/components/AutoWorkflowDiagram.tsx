@@ -5,7 +5,7 @@ export type FlowNodeId =
   | 'start'
   | 'research'
   | 'clarify'
-  | 'policy'
+  | 'design'
   | 'plan'
   | 'decision'
   | 'staff'
@@ -27,21 +27,21 @@ const MAIN_ROW: NodeDef[] = [
   { id: 'start', label: 'Intake', hint: '啟動 / Guard' },
   { id: 'research', label: 'Research', hint: '研究' },
   { id: 'clarify', label: 'Clarify', hint: '澄清' },
-  { id: 'policy', label: 'Policy', hint: '審查協定' },
-  { id: 'plan', label: 'Plan', hint: '規劃' },
+  { id: 'design', label: 'Design', hint: '系統⇄資料⇄編碼⇄UI' },
+  { id: 'plan', label: 'Plan', hint: '分派規劃' },
 ];
 
 const MID_ROW: NodeDef[] = [
   { id: 'decision', label: 'Decision', hint: '決策門' },
   { id: 'staff', label: 'Staff', hint: '建員工' },
-  { id: 'assign', label: 'Assign', hint: '分派' },
+  { id: 'assign', label: 'Assign', hint: '分波派發' },
 ];
 
 const LOOP_ROW: NodeDef[] = [
   { id: 'wait', label: 'Wait', hint: '等待事件' },
   { id: 'reconcile', label: 'Reconcile', hint: 'Runner 對帳' },
   { id: 'ai_review', label: 'AI Review', hint: 'GLM 復查' },
-  { id: 'synthesize', label: 'Synthesize', hint: '彙總' },
+  { id: 'synthesize', label: 'Synthesize', hint: '彙總 / 反饋' },
 ];
 
 const END_NODES: NodeDef[] = [
@@ -55,7 +55,8 @@ const GRAPH_NEXT_MAP: Record<string, FlowNodeId> = {
   markClarified: 'clarify',
   research: 'research',
   clarify: 'clarify',
-  agreeReviewPolicy: 'policy',
+  agreeReviewPolicy: 'design',
+  design: 'design',
   planning: 'plan',
   decisionGate: 'decision',
   meeting: 'staff',
@@ -73,7 +74,8 @@ const PHASE_MAP: Record<string, FlowNodeId> = {
   intake: 'start',
   research: 'research',
   clarify: 'clarify',
-  agree_review_policy: 'policy',
+  agree_review_policy: 'design',
+  design: 'design',
   plan: 'plan',
   planning: 'plan',
   decision: 'decision',
@@ -103,9 +105,9 @@ export function resolveActiveFlowNode(debug: AutoRunDebugSnapshot): FlowNodeId {
     case 'awaiting_decision':
       return 'decision';
     case 'awaiting_human':
-      if (debug.phase === 'agree_review_policy') return 'policy';
       if (debug.phase === 'research') return 'research';
       if (debug.phase === 'decision') return 'decision';
+      if (debug.phase === 'design' || debug.phase === 'agree_review_policy') return 'design';
       return 'clarify';
     case 'wait_events':
       return 'wait';
@@ -193,6 +195,11 @@ export function AutoWorkflowDiagram({ debug }: { debug: AutoRunDebugSnapshot }) 
     debug.aiReviewActivity.status === 'in_flight' ||
     debug.aiReviewActivity.pendingCount > 0;
 
+  const designHint =
+    debug.checkpoint?.design && typeof debug.checkpoint.design === 'object'
+      ? String(debug.checkpoint.design.active_stage ?? '')
+      : '';
+
   const activeLabel =
     [...MAIN_ROW, ...MID_ROW, ...LOOP_ROW, ...END_NODES].find((n) => n.id === activeId)
       ?.label ?? activeId;
@@ -202,7 +209,10 @@ export function AutoWorkflowDiagram({ debug }: { debug: AutoRunDebugSnapshot }) 
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="text-xs text-muted-foreground">工作流泳道</div>
         <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
-          <Badge className="bg-zinc-900 text-white">當前 · {activeLabel}</Badge>
+          <Badge className="bg-zinc-900 text-white">
+            當前 · {activeLabel}
+            {activeId === 'design' && designHint ? ` (${designHint})` : ''}
+          </Badge>
           {debug.graph.pendingInterrupt && (
             <Badge className="bg-amber-100 text-amber-900">interrupt</Badge>
           )}
@@ -218,16 +228,16 @@ export function AutoWorkflowDiagram({ debug }: { debug: AutoRunDebugSnapshot }) 
           <FlowRow nodes={MAIN_ROW} activeId={activeId} pulse={waiting} />
         </div>
 
-        <div className="text-[10px] text-muted-foreground pl-1">↓ 規劃後</div>
+        <div className="text-[10px] text-muted-foreground pl-1">↓ 設計確認後分派</div>
 
         <div>
           <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
-            分派
+            分派（分波）
           </div>
           <FlowRow nodes={MID_ROW} activeId={activeId} pulse={waiting} />
         </div>
 
-        <div className="text-[10px] text-muted-foreground pl-1">↓ 執行迴圈</div>
+        <div className="text-[10px] text-muted-foreground pl-1">↓ 執行迴圈（可反饋回 Design）</div>
 
         <div>
           <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
@@ -235,7 +245,7 @@ export function AutoWorkflowDiagram({ debug }: { debug: AutoRunDebugSnapshot }) 
           </div>
           <FlowRow nodes={LOOP_ROW} activeId={activeId} pulse={waiting} />
           <p className="text-[10px] text-muted-foreground mt-1">
-            Synthesize 後通常回到 Wait；全部完成則進 Done
+            Synthesize 可派下一波、處理反饋，或回到 Design；全部完成則進 Done
           </p>
         </div>
 

@@ -7,6 +7,7 @@ export type PendingCommand =
   | { type: 'decision_resolved'; decisionId: string; optionId?: string }
   | { type: 'stop' }
   | { type: 'force_replan' }
+  | { type: 'force_redesign' }
   | { type: 'skip_clarify' }
   | { type: 'retry_runner' }
   | { type: 'tick' };

@@ -50,11 +50,38 @@ const BLOCKED_HINTS: Record<BlockedReason, string> = {
 };
 
 function pickCheckpointSummary(cp: Record<string, unknown>) {
+  const design =
+    cp.design && typeof cp.design === 'object' && !Array.isArray(cp.design)
+      ? (cp.design as {
+          active_stage?: string;
+          design_done?: boolean;
+          skipped?: string[];
+        })
+      : null;
+  const dispatch =
+    cp.dispatch && typeof cp.dispatch === 'object' && !Array.isArray(cp.dispatch)
+      ? (cp.dispatch as { waves_done?: number; enqueued?: string[] })
+      : null;
   return {
     research_done: checkpointFlag(cp, 'research_done'),
     research_task_id: typeof cp.research_task_id === 'string' ? cp.research_task_id : null,
     skip_clarify_after_research: checkpointFlag(cp, 'skip_clarify_after_research'),
     clarified: isClarified(cp),
+    design: design
+      ? {
+          active_stage: design.active_stage ?? null,
+          design_done: Boolean(design.design_done),
+          skipped: Array.isArray(design.skipped) ? design.skipped : [],
+        }
+      : null,
+    force_redesign: checkpointFlag(cp, 'force_redesign'),
+    dispatch_waves: dispatch ? Number(dispatch.waves_done ?? 0) : 0,
+    dispatch_enqueued: Array.isArray(dispatch?.enqueued) ? dispatch!.enqueued.length : 0,
+    feedback_pending: Array.isArray(cp.feedback_queue)
+      ? cp.feedback_queue.filter(
+          (f) => f && typeof f === 'object' && (f as { status?: string }).status === 'pending',
+        ).length
+      : 0,
     created_task_ids: createdTaskIdsFromCheckpoint(cp),
     plan_task_count: Array.isArray((cp.plan as { tasks?: unknown[] } | undefined)?.tasks)
       ? ((cp.plan as { tasks: unknown[] }).tasks.length)
@@ -216,7 +243,7 @@ export async function getRunDebugSnapshot(runId: string) {
       aiReviewSummary = `有 ${pendingAi.length} 個待復查，但未配置 ZAI_API_KEY，無法派發。`;
     } else if (inFlight.length) {
       aiReviewStatus = 'in_flight';
-      aiReviewSummary = `正在復查（GLM）：${inFlight.map((r) => r.taskId).join(', ')}。這不是 Cursor/OpenCode Runner，請等日誌出現「已通過／退回／失敗」。`;
+      aiReviewSummary = `正在復查（GLM）：${inFlight.map((r) => r.taskId).join(', ')}。這不是 Cursor/Pi Runner，請等日誌出現「已通過／退回／失敗」。`;
     } else if (onCooldown.length && !ready.length) {
       aiReviewStatus = 'cooldown';
       const sec = Math.ceil(Math.max(...onCooldown.map((r) => r.cooldownRemainingMs)) / 1000);

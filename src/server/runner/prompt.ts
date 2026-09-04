@@ -21,6 +21,13 @@ export function buildRunnerPrompt(input: {
         '1. 只在當前工作目錄內修改與此任務相關的業務代碼；不要改 `.pm-ai/` 任務帳本。',
         '2. 完成實現後儘量在任務分支上 commit（若為 git 倉庫）。',
         '3. 最後用簡短中文總結：改了哪些檔、如何驗證、是否仍有風險。',
+        '4. 若發現上游設計／UI／資料模型不合理、需協調者改派其他角色，請在結果說明中加入：',
+        '[[feedback]]',
+        'target_role: designer',
+        'target_stage: ui',
+        'message: 具體問題與建議',
+        '[[/feedback]]',
+        '（target_stage 可為 system|data|coding|ui；可省略。）',
       ];
 
   return [

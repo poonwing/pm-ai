@@ -216,7 +216,7 @@ async function runOneAiReview(projectId: string, runId: string, taskId: string) 
   appendRunMessage(
     runId,
     'assistant',
-    `正在派 ${reviewer.name}（${reviewer.role}）復查 ${taskId}「${task.title}」…（GLM 審查中，非 Cursor/OpenCode Runner）`,
+    `正在派 ${reviewer.name}（${reviewer.role}）復查 ${taskId}「${task.title}」…（GLM 審查中，非 Cursor/Pi Runner）`,
   );
   appendRunEvent(
     runId,

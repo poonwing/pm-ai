@@ -77,7 +77,7 @@ export interface Project {
   previewInstallIfNeeded?: boolean;
   previewWorkdir?: string;
   runMode?: 'manual' | 'auto';
-  runnerProvider?: 'cursor' | 'opencode';
+  runnerProvider?: 'cursor' | 'pi';
 }
 
 export interface PreviewInfo {
@@ -315,7 +315,7 @@ export const projectsApi = {
       preview_install_if_needed?: boolean;
       preview_workdir?: string;
       run_mode?: 'manual' | 'auto';
-      runner_provider?: 'cursor' | 'opencode';
+      runner_provider?: 'cursor' | 'pi';
     },
   ) =>
     api<Project>(`/projects/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -749,6 +749,15 @@ export interface AutoRunDebugSnapshot {
     research_task_id: string | null;
     skip_clarify_after_research: boolean;
     clarified: boolean;
+    design: {
+      active_stage: string | null;
+      design_done: boolean;
+      skipped: string[];
+    } | null;
+    force_redesign: boolean;
+    dispatch_waves: number;
+    dispatch_enqueued: number;
+    feedback_pending: number;
     created_task_ids: string[];
     plan_task_count: number | null;
     runner_retry_counts: Record<string, number>;
@@ -879,8 +888,8 @@ export const autoApi = {
     ),
   runnerStatus: (projectId: string) =>
     api<{
-      provider: 'cursor' | 'opencode';
-      defaultProvider?: 'cursor' | 'opencode';
+      provider: 'cursor' | 'pi';
+      defaultProvider?: 'cursor' | 'pi';
       source?: 'project' | 'env';
       configured: boolean;
       cliInstalled: boolean;

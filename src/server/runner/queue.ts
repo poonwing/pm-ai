@@ -13,8 +13,7 @@ import { appendRunMessage } from '../services/auto.js';
 import { appendRunEvent } from '../services/run-events.js';
 import { readProjectConfig } from '../services/files.js';
 import { runCursorSdkPrompt } from './cursor-sdk-runner.js';
-import { runOpenCodePrompt } from './opencode-runner.js';
-import { isOpenCodeCliInstalled, OPENCODE_CLI_INSTALL_HINT } from './opencode-cli.js';
+import { runPiAgentPrompt } from './pi-runner.js';
 import { buildRunnerPrompt } from './prompt.js';
 import { isRetryableConnectionError } from '../orchestrator/model.js';
 import { appendRunnerLog, updateOrAppendRunnerLog } from './logs.js';
@@ -22,14 +21,45 @@ import {
   getDefaultRunnerProvider,
   getRunnerConcurrency,
   isCursorRunnerConfigured,
-  isOpenCodeRunnerConfigured,
+  isPiRunnerConfigured,
   parseRunnerProvider,
+  runnerProviderAgentName,
+  runnerProviderLabel,
   type RunnerJob,
   type RunnerJobStatus,
   type RunnerProvider,
   type RunnerJobKind,
   type StudioKind,
 } from './types.js';
+
+function runPromptForProvider(
+  provider: RunnerProvider,
+  input: {
+    prompt: string;
+    cwd: string;
+    taskId: string;
+    name?: string;
+    signal?: AbortSignal;
+    onLog?: (kind: import('./logs.js').RunnerLogKind, text: string) => void;
+  },
+) {
+  if (provider === 'pi') {
+    return runPiAgentPrompt({
+      prompt: input.prompt,
+      cwd: input.cwd,
+      taskId: input.taskId,
+      signal: input.signal,
+      onLog: input.onLog,
+    });
+  }
+  return runCursorSdkPrompt({
+    prompt: input.prompt,
+    cwd: input.cwd,
+    name: input.name ?? `pm-ai-${input.taskId}`,
+    signal: input.signal,
+    onLog: input.onLog,
+  });
+}
 
 const RUNNER_PROMPT_MAX_ATTEMPTS = 3;
 
@@ -83,15 +113,14 @@ export function getLatestRunnerJobForTask(
 }
 
 function missingKeyMessage(provider: RunnerProvider): string {
-  return provider === 'opencode'
-    ? '未配置 ZAI_API_KEY（OpenCode 复用 GLM Coding Plan Key）'
+  return provider === 'pi'
+    ? '未配置 ZAI_API_KEY（Pi Agent 复用 GLM Coding Plan Key）'
     : '未配置 CURSOR_API_KEY，無法啟動 Cursor SDK Runner';
 }
 
 function runnerBlockReason(provider: RunnerProvider): string | null {
-  if (provider === 'opencode') {
-    if (!isOpenCodeRunnerConfigured()) return missingKeyMessage(provider);
-    if (!isOpenCodeCliInstalled()) return OPENCODE_CLI_INSTALL_HINT;
+  if (provider === 'pi') {
+    if (!isPiRunnerConfigured()) return missingKeyMessage(provider);
     return null;
   }
   if (!isCursorRunnerConfigured()) return missingKeyMessage(provider);
@@ -126,8 +155,8 @@ export function getRunnerStatus(projectId: string) {
         return 'env' as const;
       }
     })(),
-    configured: provider === 'opencode' ? isOpenCodeRunnerConfigured() : isCursorRunnerConfigured(),
-    cliInstalled: provider !== 'opencode' || isOpenCodeCliInstalled(),
+    configured: provider === 'pi' ? isPiRunnerConfigured() : isCursorRunnerConfigured(),
+    cliInstalled: true,
     ready: hint === null,
     hint,
     concurrency: getRunnerConcurrency(provider),
@@ -224,7 +253,7 @@ export function enqueueRunnerJob(input: {
     prompt: input.prompt,
     cwd: input.cwd,
     status: 'queued',
-    agentName: provider === 'opencode' ? 'opencode' : 'cursor-sdk',
+    agentName: runnerProviderAgentName(provider),
     provider,
     createdAt: now(),
     updatedAt: now(),
@@ -286,7 +315,7 @@ async function runJob(jobId: string) {
   controllers.set(jobId, controller);
 
   let leaseToken: string | null = null;
-  let agentName = provider === 'opencode' ? 'opencode' : 'cursor-sdk';
+  let agentName = runnerProviderAgentName(provider);
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   try {
@@ -352,7 +381,7 @@ async function runJob(jobId: string) {
       executionPath: cwd,
     });
 
-    const label = provider === 'opencode' ? 'OpenCode' : 'Cursor SDK';
+    const label = runnerProviderLabel(provider);
     appendRunnerLog(
       job.projectId,
       job.taskId,
@@ -373,22 +402,14 @@ async function runJob(jobId: string) {
       );
     }
 
-    let outcome =
-      provider === 'opencode'
-        ? await runOpenCodePrompt({
-            prompt,
-            cwd,
-            taskId: job.taskId,
-            signal: controller.signal,
-            onLog,
-          })
-        : await runCursorSdkPrompt({
-            prompt,
-            cwd,
-            name: `pm-ai-${job.taskId}`,
-            signal: controller.signal,
-            onLog,
-          });
+    let outcome = await runPromptForProvider(provider, {
+      prompt,
+      cwd,
+      taskId: job.taskId,
+      name: `pm-ai-${job.taskId}`,
+      signal: controller.signal,
+      onLog,
+    });
 
     for (let attempt = 1; attempt < RUNNER_PROMPT_MAX_ATTEMPTS; attempt++) {
       if (outcome.ok || outcome.status === 'cancelled' || controller.signal.aborted) break;
@@ -413,22 +434,14 @@ async function runJob(jobId: string) {
       }
       await sleep(400 * attempt);
       if (controller.signal.aborted) break;
-      outcome =
-        provider === 'opencode'
-          ? await runOpenCodePrompt({
-              prompt,
-              cwd,
-              taskId: job.taskId,
-              signal: controller.signal,
-              onLog,
-            })
-          : await runCursorSdkPrompt({
-              prompt,
-              cwd,
-              name: `pm-ai-${job.taskId}`,
-              signal: controller.signal,
-              onLog,
-            });
+      outcome = await runPromptForProvider(provider, {
+        prompt,
+        cwd,
+        taskId: job.taskId,
+        name: `pm-ai-${job.taskId}`,
+        signal: controller.signal,
+        onLog,
+      });
     }
 
     job = touch(job, { sdkRunId: outcome.runId ?? null });
@@ -552,7 +565,7 @@ async function runStudioJob(jobId: string) {
   const provider = job.provider ?? resolveRunnerProvider(job.projectId);
   const controller = new AbortController();
   controllers.set(jobId, controller);
-  const agentName = provider === 'opencode' ? 'opencode' : 'cursor-sdk';
+  const agentName = runnerProviderAgentName(provider);
   const cwd = job.cwd;
   const prompt = job.prompt;
 
@@ -562,26 +575,19 @@ async function runStudioJob(jobId: string) {
     }
 
     job = touch(job, { status: 'running', provider, agentName });
-    const label = provider === 'opencode' ? 'OpenCode' : 'Cursor SDK';
+    const label = runnerProviderLabel(provider);
     const name =
       job.studioKind === 'design'
         ? `pm-ai-design-${job.projectId.slice(0, 8)}`
         : `pm-ai-req-${job.projectId.slice(0, 8)}`;
 
-    const outcome =
-      provider === 'opencode'
-        ? await runOpenCodePrompt({
-            prompt,
-            cwd,
-            taskId: job.studioKind ?? 'studio',
-            signal: controller.signal,
-          })
-        : await runCursorSdkPrompt({
-            prompt,
-            cwd,
-            name,
-            signal: controller.signal,
-          });
+    const outcome = await runPromptForProvider(provider, {
+      prompt,
+      cwd,
+      taskId: job.studioKind ?? 'studio',
+      name,
+      signal: controller.signal,
+    });
 
     job = touch(job, { sdkRunId: outcome.runId ?? null });
 
@@ -623,7 +629,7 @@ async function runChatJob(jobId: string) {
   const provider = job.provider ?? resolveRunnerProvider(job.projectId);
   const controller = new AbortController();
   controllers.set(jobId, controller);
-  const agentName = provider === 'opencode' ? 'opencode' : 'cursor-sdk';
+  const agentName = runnerProviderAgentName(provider);
   const cwd = job.cwd;
   const prompt = job.prompt;
   const sessionId = job.chatSessionId;
@@ -645,24 +651,16 @@ async function runChatJob(jobId: string) {
     }
 
     job = touch(job, { status: 'running', provider, agentName });
-    onLog('system', `${provider === 'opencode' ? 'OpenCode' : 'Cursor SDK'} 開始執行…`);
+    onLog('system', `${runnerProviderLabel(provider)} 開始執行…`);
 
-    const outcome =
-      provider === 'opencode'
-        ? await runOpenCodePrompt({
-            prompt,
-            cwd,
-            taskId: job.taskId || `chat-${sessionId.slice(0, 8)}`,
-            signal: controller.signal,
-            onLog,
-          })
-        : await runCursorSdkPrompt({
-            prompt,
-            cwd,
-            name: `pm-ai-chat-${sessionId.slice(0, 8)}`,
-            signal: controller.signal,
-            onLog,
-          });
+    const outcome = await runPromptForProvider(provider, {
+      prompt,
+      cwd,
+      taskId: job.taskId || `chat-${sessionId.slice(0, 8)}`,
+      name: `pm-ai-chat-${sessionId.slice(0, 8)}`,
+      signal: controller.signal,
+      onLog,
+    });
 
     job = touch(job, { sdkRunId: outcome.runId ?? null });
 

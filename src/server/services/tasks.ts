@@ -358,9 +358,11 @@ function getProjectPreviewFields(workspacePath: string) {
     previewWorkdir: config?.preview_workdir ?? '',
     runMode: config?.run_mode ?? 'manual',
     runnerProvider:
-      config?.runner_provider === 'cursor' || config?.runner_provider === 'opencode'
+      config?.runner_provider === 'cursor' || config?.runner_provider === 'pi'
         ? config.runner_provider
-        : undefined,
+        : config?.runner_provider === 'opencode'
+          ? 'pi'
+          : undefined,
   };
 }
 
@@ -448,7 +450,7 @@ export function updateProject(
     preview_install_if_needed?: boolean;
     preview_workdir?: string;
     run_mode?: 'manual' | 'auto';
-    runner_provider?: 'cursor' | 'opencode';
+    runner_provider?: 'cursor' | 'pi' | 'opencode';
   },
 ) {
   const project = getProject(projectId);
@@ -472,7 +474,8 @@ export function updateProject(
       config.run_mode = updates.run_mode;
     }
     if (updates.runner_provider !== undefined) {
-      config.runner_provider = updates.runner_provider;
+      config.runner_provider =
+        updates.runner_provider === 'opencode' ? 'pi' : updates.runner_provider;
     }
     if (
       updates.name ||

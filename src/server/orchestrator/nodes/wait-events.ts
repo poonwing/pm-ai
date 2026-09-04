@@ -2,10 +2,15 @@ import { interrupt } from '@langchain/langgraph';
 import type { OrchestratorStateType } from '../state.js';
 import { syncRunMirror } from '../sync.js';
 import { appendRunEvent } from '../../services/run-events.js';
+import { checkpointFlag } from '../helpers.js';
 
 export async function waitEventsNode(
   state: OrchestratorStateType,
 ): Promise<Partial<OrchestratorStateType>> {
+  if (checkpointFlag(state.checkpoint, 'force_redesign')) {
+    return { phase: 'design', status: 'running' };
+  }
+
   if (state.forceReplan) {
     return { forceReplan: true, phase: 'plan', status: 'running' };
   }
@@ -24,6 +29,9 @@ export async function waitEventsNode(
 }
 
 export function routeAfterWait(state: OrchestratorStateType): string {
+  if (checkpointFlag(state.checkpoint, 'force_redesign') || state.phase === 'design') {
+    return 'design';
+  }
   if (state.forceReplan) return 'planning';
   if (state.status === 'completed' || state.phase === 'completed') return 'endDone';
   return 'reconcileRunner';

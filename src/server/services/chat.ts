@@ -259,18 +259,16 @@ function buildAgentPrompt(
 
 async function runAgentTurn(projectId: string, sessionId: string, userText: string) {
   const project = getProject(projectId);
-  const { resolveRunnerProvider, enqueueRunnerJob } = await import('../runner/index.js');
+  const { resolveRunnerProvider, enqueueRunnerJob, runnerProviderLabel } = await import(
+    '../runner/index.js'
+  );
   const provider = resolveRunnerProvider(projectId);
   const history = listChatMessages(projectId, sessionId);
   const prompt = buildAgentPrompt(project, history, userText);
 
   touchSession(sessionId, { status: 'running', provider });
   appendChatStream(sessionId, 'status', 'running');
-  appendChatStream(
-    sessionId,
-    'system',
-    `已交給 ${provider === 'opencode' ? 'OpenCode' : 'Cursor SDK'} 執行…`,
-  );
+  appendChatStream(sessionId, 'system', `已交給 ${runnerProviderLabel(provider)} 執行…`);
 
   const job = enqueueRunnerJob({
     projectId,

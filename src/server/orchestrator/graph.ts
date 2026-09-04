@@ -10,10 +10,7 @@ import {
 } from './nodes/guard.js';
 import { researchNode } from './nodes/research.js';
 import { clarifyNode } from './nodes/clarify.js';
-import {
-  agreeReviewPolicyNode,
-  routeAfterPolicy,
-} from './nodes/agree-review-policy.js';
+import { designNode, routeAfterDesign } from './nodes/design.js';
 import { planNode, routeAfterPlan } from './nodes/plan.js';
 import {
   decisionGateNode,
@@ -45,14 +42,14 @@ function routeAfterResearch(state: OrchestratorStateType): string {
     state.skipClarify ||
     checkpointFlag(state.checkpoint, 'skip_clarify_after_research')
   ) {
-    return 'agreeReviewPolicy';
+    return 'design';
   }
   return 'clarify';
 }
 
 function routeAfterClarify(state: OrchestratorStateType): string {
   if (state.status === 'awaiting_human') return '__interrupt__';
-  return 'agreeReviewPolicy';
+  return 'design';
 }
 
 function routeAfterAssign(state: OrchestratorStateType): string {
@@ -73,7 +70,7 @@ export function buildOrchestratorGraph() {
     .addNode('markClarified', markClarifiedNode)
     .addNode('research', researchNode)
     .addNode('clarify', clarifyNode)
-    .addNode('agreeReviewPolicy', agreeReviewPolicyNode)
+    .addNode('design', designNode)
     .addNode('planning', planNode)
     .addNode('decisionGate', decisionGateNode)
     .addNode('meeting', meetingNode)
@@ -94,22 +91,22 @@ export function buildOrchestratorGraph() {
       research: 'research',
       clarify: 'clarify',
       markClarified: 'markClarified',
-      agreeReviewPolicy: 'agreeReviewPolicy',
+      design: 'design',
       planning: 'planning',
       waitEvents: 'waitEvents',
       __interrupt__: END,
     })
     .addConditionalEdges('research', routeAfterResearch, {
       clarify: 'clarify',
-      agreeReviewPolicy: 'agreeReviewPolicy',
+      design: 'design',
       __interrupt__: END,
     })
     .addConditionalEdges('clarify', routeAfterClarify, {
-      agreeReviewPolicy: 'agreeReviewPolicy',
+      design: 'design',
       __interrupt__: END,
     })
-    .addEdge('markClarified', 'agreeReviewPolicy')
-    .addConditionalEdges('agreeReviewPolicy', (s) => mapRoute(routeAfterPolicy(s)), {
+    .addEdge('markClarified', 'design')
+    .addConditionalEdges('design', routeAfterDesign, {
       planning: 'planning',
       __interrupt__: END,
     })
@@ -130,6 +127,7 @@ export function buildOrchestratorGraph() {
     })
     .addConditionalEdges('waitEvents', routeAfterWait, {
       planning: 'planning',
+      design: 'design',
       reconcileRunner: 'reconcileRunner',
       endDone: 'endDone',
     })
@@ -137,6 +135,8 @@ export function buildOrchestratorGraph() {
     .addEdge('dispatchAiReview', 'synthesize')
     .addConditionalEdges('synthesize', routeAfterSynthesize, {
       waitEvents: 'waitEvents',
+      assign: 'assign',
+      design: 'design',
       endDone: 'endDone',
     })
     .addEdge('endStopped', END)
@@ -150,4 +150,9 @@ let _compiled: ReturnType<typeof buildOrchestratorGraph> | null = null;
 export function getCompiledOrchestratorGraph() {
   if (!_compiled) _compiled = buildOrchestratorGraph();
   return _compiled;
+}
+
+/** Reset compiled graph (tests / hot-reload after schema changes). */
+export function resetCompiledOrchestratorGraph() {
+  _compiled = null;
 }

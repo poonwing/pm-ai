@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   autoApi,
@@ -9,7 +9,6 @@ import {
   AutoRunEvent,
   Decision,
   ReviewPolicy,
-  Project,
 } from '../lib/api';
 import { Button, Input, Textarea, Label, Badge } from '../components/ui';
 import { AutoWorkflowDiagram } from '../components/AutoWorkflowDiagram';
@@ -22,6 +21,57 @@ const EVENT_FILTERS = [
   { id: 'decision', label: '決策' },
   { id: 'system', label: '系統' },
 ] as const;
+
+/** 對話列表：載入與更新後都貼齊最新訊息 */
+function AutoChatThread({
+  messages,
+  className,
+}: {
+  messages: AutoRunMessage[];
+  className?: string;
+}) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const innerRef = useRef<HTMLDivElement>(null);
+
+  const scrollToLatest = useCallback(() => {
+    const list = listRef.current;
+    if (!list) return;
+    list.scrollTop = list.scrollHeight;
+  }, []);
+
+  useLayoutEffect(() => {
+    scrollToLatest();
+  }, [messages, scrollToLatest]);
+
+  useEffect(() => {
+    const inner = innerRef.current;
+    if (!inner) return;
+    const ro = new ResizeObserver(() => scrollToLatest());
+    ro.observe(inner);
+    scrollToLatest();
+    const t = window.setTimeout(scrollToLatest, 50);
+    return () => {
+      ro.disconnect();
+      window.clearTimeout(t);
+    };
+  }, [messages, scrollToLatest]);
+
+  return (
+    <div
+      ref={listRef}
+      className={`min-h-0 overflow-y-auto border border-border rounded-md p-3 bg-zinc-50 ${className ?? ''}`}
+    >
+      <div ref={innerRef} className="flex flex-col gap-2">
+        {messages.map((m) => (
+          <div key={m.id} className="text-sm">
+            <span className="text-xs text-muted-foreground uppercase mr-2">{m.role}</span>
+            <span className="whitespace-pre-wrap">{m.content}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function eventCategoryClass(category: string): string {
   switch (category) {
@@ -360,7 +410,6 @@ function RunInspector({
 
 export function AutoPage() {
   const { projectId } = useParams<{ projectId: string }>();
-  const [project, setProject] = useState<Project | null>(null);
   const [runs, setRuns] = useState<AutoRun[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AutoRunMessage[]>([]);
@@ -380,11 +429,10 @@ export function AutoPage() {
     }>
   >([]);
   const [runnerConfigured, setRunnerConfigured] = useState(false);
-  const [runnerCliInstalled, setRunnerCliInstalled] = useState(true);
   const [runnerHint, setRunnerHint] = useState<string | null>(null);
-  const [runnerProvider, setRunnerProvider] = useState<'cursor' | 'opencode'>('cursor');
+  const [runnerProvider, setRunnerProvider] = useState<'cursor' | 'pi'>('cursor');
   const [runnerProviderSource, setRunnerProviderSource] = useState<'project' | 'env'>('env');
-  const [runnerDefaultProvider, setRunnerDefaultProvider] = useState<'cursor' | 'opencode'>('cursor');
+  const [runnerDefaultProvider, setRunnerDefaultProvider] = useState<'cursor' | 'pi'>('cursor');
   const [goal, setGoal] = useState('');
   const [chat, setChat] = useState('');
   const [decisionNotes, setDecisionNotes] = useState<Record<string, string>>({});
@@ -407,20 +455,17 @@ export function AutoPage() {
 
   const load = useCallback(async () => {
     if (!projectId) return;
-    const [p, r, pol, openDec, runner] = await Promise.all([
-      projectsApi.get(projectId),
+    const [r, pol, openDec, runner] = await Promise.all([
       autoApi.listRuns(projectId),
       autoApi.getPolicy(projectId),
       autoApi.listDecisions(projectId, 'open'),
       autoApi.runnerStatus(projectId).catch(() => null),
     ]);
-    setProject(p);
     setRuns(r);
     setPolicy(pol);
     setDecisions(openDec);
     if (runner) {
       setRunnerConfigured(runner.configured);
-      setRunnerCliInstalled(runner.cliInstalled);
       setRunnerHint(runner.hint);
       setRunnerProvider(runner.provider);
       setRunnerProviderSource(runner.source ?? 'env');
@@ -461,7 +506,6 @@ export function AutoPage() {
         .runnerStatus(projectId)
         .then((runner) => {
           setRunnerConfigured(runner.configured);
-          setRunnerCliInstalled(runner.cliInstalled);
           setRunnerHint(runner.hint);
           setRunnerProvider(runner.provider);
           setRunnerProviderSource(runner.source ?? 'env');
@@ -549,13 +593,7 @@ export function AutoPage() {
     }
   };
 
-  const setMode = async (mode: 'manual' | 'auto') => {
-    if (!projectId) return;
-    await projectsApi.update(projectId, { run_mode: mode });
-    await load();
-  };
-
-  const setRunnerProviderForProject = async (provider: 'cursor' | 'opencode') => {
+  const setRunnerProviderForProject = async (provider: 'cursor' | 'pi') => {
     if (!projectId || busy) return;
     setBusy(true);
     setError('');
@@ -619,7 +657,7 @@ export function AutoPage() {
       <div>
         <h1 className="text-xl font-semibold">Auto 工作台</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          與協調者先對齊需求；確認後再進審查協定、建員工與分派。模糊目標請多聊幾輪，回覆「開始工作」才開工。
+          與協調者先對齊需求，確認後進入設計與分派。模糊目標請多聊幾輪，回覆「開始工作」才開工。
         </p>
       </div>
 
@@ -633,38 +671,14 @@ export function AutoPage() {
           onRefresh={() => void loadDebug(activeRunId)}
         />
       )}
-      <section className="border border-border rounded-lg p-4 flex flex-col gap-3">
-        <div className="flex items-center justify-between">
-          <h2 className="font-medium text-sm">運行模式</h2>
-          <Badge>{project?.runMode ?? 'manual'}</Badge>
-        </div>
-        <div className="flex gap-2">
-          <Button
-            size="sm"
-            variant={project?.runMode === 'manual' ? undefined : 'ghost'}
-            onClick={() => setMode('manual')}
-          >
-            手動
-          </Button>
-          <Button
-            size="sm"
-            variant={project?.runMode === 'auto' ? undefined : 'ghost'}
-            onClick={() => setMode('auto')}
-          >
-            Auto
-          </Button>
-        </div>
-      </section>
 
       <section className="border border-border rounded-lg p-4 flex flex-col gap-3">
         <div className="flex items-center justify-between">
-          <h2 className="font-medium text-sm">Review Policy</h2>
-          <Badge className={policy?.confirmed ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100'}>
-            {policy?.confirmed ? '已確認' : '待確認'}
-          </Badge>
+          <h2 className="font-medium text-sm">預設審查偏好</h2>
+          <Badge className="bg-zinc-100 text-zinc-700">設定 · 非流程門檻</Badge>
         </div>
-        <p className="text-sm text-muted-foreground whitespace-pre-wrap">
-          {policy?.human_verify_notes}
+        <p className="text-sm text-muted-foreground">
+          僅作為協調者規劃任務時的預設提示；每個任務的實際審查者仍由協調者決定。不會再阻擋 Auto Run 流程。
         </p>
         <div className="flex flex-wrap items-end gap-2">
           <div className="flex flex-col gap-1 min-w-[12rem]">
@@ -687,15 +701,9 @@ export function AutoPage() {
               ))}
             </select>
           </div>
-          {policy?.confirmed ? (
-            <Button size="sm" disabled={busy || !policy} onClick={() => savePolicy(false)}>
-              儲存
-            </Button>
-          ) : (
-            <Button size="sm" disabled={busy || !policy} onClick={() => savePolicy(true)}>
-              確認協定
-            </Button>
-          )}
+          <Button size="sm" disabled={busy || !policy} onClick={() => savePolicy(true)}>
+            儲存
+          </Button>
         </div>
       </section>
 
@@ -759,29 +767,24 @@ export function AutoPage() {
             </Badge>
             <Badge className={runnerConfigured ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100'}>
               {runnerConfigured
-                ? runnerProvider === 'opencode'
+                ? runnerProvider === 'pi'
                   ? 'GLM Key 可用'
                   : 'Cursor Key 可用'
-                : runnerProvider === 'opencode'
+                : runnerProvider === 'pi'
                   ? '缺少 ZAI_API_KEY'
                   : '缺少 CURSOR_API_KEY'}
             </Badge>
-            {runnerProvider === 'opencode' && (
-              <Badge className={runnerCliInstalled ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100'}>
-                {runnerCliInstalled ? 'OpenCode CLI 可用' : '缺少 OpenCode CLI'}
-              </Badge>
-            )}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-muted-foreground">Provider：</span>
           <Button
             size="sm"
-            variant={runnerProvider === 'opencode' ? 'default' : 'ghost'}
+            variant={runnerProvider === 'pi' ? 'default' : 'ghost'}
             disabled={busy}
-            onClick={() => setRunnerProviderForProject('opencode')}
+            onClick={() => setRunnerProviderForProject('pi')}
           >
-            OpenCode（GLM）
+            Pi Agent（GLM）
           </Button>
           <Button
             size="sm"
@@ -796,12 +799,11 @@ export function AutoPage() {
           每個專案可獨立選擇 Runner。設定寫入{' '}
           <code>.pm-ai/project.yml</code> 的 <code>runner_provider</code>
           ；未設定時沿用全域 <code>.env</code> 的 <code>RUNNER_PROVIDER</code>
-          。OpenCode 复用 <code>ZAI_API_KEY</code>，本机还需安装 opencode CLI。
+          。Pi Agent 复用 <code>ZAI_API_KEY</code>，進程內執行，無需安裝 OpenCode CLI。
         </p>
-        {runnerProvider === 'opencode' && !runnerCliInstalled && (
+        {runnerProvider === 'pi' && !runnerConfigured && (
           <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
-            {runnerHint ??
-              '未检测到 OpenCode CLI。请先安装后再执行任务：curl -fsSL https://opencode.ai/install | bash  或  npm i -g opencode-ai，然后重开终端并重启 PM-AI。'}
+            {runnerHint ?? '未配置 ZAI_API_KEY，無法啟動 Pi Agent Runner。'}
           </p>
         )}
         {runnerJobs.filter((j) => j.kind !== 'studio').length === 0 ? (
@@ -910,14 +912,7 @@ export function AutoPage() {
                 推進一步
               </Button>
             </div>
-            <div className="max-h-80 overflow-y-auto flex flex-col gap-2 border border-border rounded-md p-3 bg-zinc-50">
-              {messages.map((m) => (
-                <div key={m.id} className="text-sm">
-                  <span className="text-xs text-muted-foreground uppercase mr-2">{m.role}</span>
-                  <span className="whitespace-pre-wrap">{m.content}</span>
-                </div>
-              ))}
-            </div>
+            <AutoChatThread messages={messages} className="h-80" />
             <div className="flex gap-2">
               <Input
                 value={chat}
@@ -940,14 +935,7 @@ export function AutoPage() {
           </>
         )}
         {runEnded && messages.length > 0 && (
-          <div className="max-h-48 overflow-y-auto flex flex-col gap-2 border border-border rounded-md p-3 bg-zinc-50">
-            {messages.map((m) => (
-              <div key={m.id} className="text-sm">
-                <span className="text-xs text-muted-foreground uppercase mr-2">{m.role}</span>
-                <span className="whitespace-pre-wrap">{m.content}</span>
-              </div>
-            ))}
-          </div>
+          <AutoChatThread messages={messages} className="h-48" />
         )}
       </section>
 

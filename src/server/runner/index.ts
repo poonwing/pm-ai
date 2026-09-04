@@ -18,19 +18,18 @@ export {
 } from './logs.js';
 export {
   isCursorRunnerConfigured,
+  isPiRunnerConfigured,
   isOpenCodeRunnerConfigured,
   isRunnerConfigured,
   getCursorRunnerConfig,
+  getPiRunnerConfig,
   getOpenCodeRunnerConfig,
   getDefaultRunnerProvider,
   getRunnerProvider,
   getRunnerConcurrency,
   parseRunnerProvider,
+  runnerProviderLabel,
   type RunnerProvider,
   type RunnerJobKind,
   type StudioKind,
 } from './types.js';
-export {
-  isOpenCodeCliInstalled,
-  OPENCODE_CLI_INSTALL_HINT,
-} from './opencode-cli.js';

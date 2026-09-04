@@ -43,7 +43,7 @@ async function finishResearchState(
   const next = {
     ...state,
     status: 'running',
-    phase: skip ? 'agree_review_policy' : 'clarify',
+    phase: skip ? 'design' : 'clarify',
     checkpoint,
   };
   syncRunMirror(next);
