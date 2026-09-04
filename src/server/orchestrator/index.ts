@@ -164,7 +164,7 @@ function buildGraphInvokeCommand(input: {
   if (userClarifyTurn) {
     return new Command({
       goto: 'clarify' as const,
-      update: { ...hydrated, pendingCommand: null, status: 'running' },
+      update: { ...hydrated, pendingCommand: null },
     });
   }
 
@@ -175,12 +175,13 @@ function buildGraphInvokeCommand(input: {
   if (userDesignTurn && isDesignPhase(run.phase)) {
     return new Command({
       goto: 'design' as const,
-      update: { ...hydrated, pendingCommand, status: 'running' },
+      update: { ...hydrated, pendingCommand },
     });
   }
 
   // Prefer jumping to the next phase once research is done in DB.
   // Resuming a stale research interrupt alone can re-park at END if checkpoint lags.
+  // Do not set status/phase here — the target node owns those channels (avoids LastValue clash).
   if (
     researchDone &&
     !isClarified(cp) &&
@@ -193,8 +194,6 @@ function buildGraphInvokeCommand(input: {
       update: {
         ...hydrated,
         pendingCommand: null,
-        status: 'running',
-        phase: 'clarify',
       },
     });
   }
@@ -212,8 +211,6 @@ function buildGraphInvokeCommand(input: {
       update: {
         ...hydrated,
         pendingCommand: null,
-        status: 'running',
-        phase: 'design',
       },
     });
   }
@@ -230,7 +227,7 @@ function buildGraphInvokeCommand(input: {
     return new Command({
       goto: 'design' as const,
       ...(pendingInterrupt ? { resume: resumePayload } : {}),
-      update,
+      update: { ...hydrated, pendingCommand: null },
     });
   }
 
@@ -252,7 +249,7 @@ function buildGraphInvokeCommand(input: {
   if (waitingPhase && wantsAdvance) {
     return new Command({
       goto: 'reconcileRunner' as const,
-      update: { ...update, status: 'running' },
+      update: { ...hydrated, pendingCommand },
     });
   }
 

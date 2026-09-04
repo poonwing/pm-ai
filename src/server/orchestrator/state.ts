@@ -12,19 +12,54 @@ export type PendingCommand =
   | { type: 'retry_runner' }
   | { type: 'tick' };
 
+/** Last-write-wins — Command.update + node return can both write in one step. */
+function lastWrite<T>(left: T, right: T): T {
+  return right !== undefined && right !== null ? right : left;
+}
+
 export const OrchestratorState = Annotation.Root({
   runId: Annotation<string>,
   projectId: Annotation<string>,
-  goal: Annotation<string>,
-  phase: Annotation<string>,
-  status: Annotation<string>,
-  checkpoint: Annotation<Record<string, unknown>>,
-  plan: Annotation<OrchestratorPlan | null>,
-  pendingCommand: Annotation<PendingCommand | null>,
-  stopRequested: Annotation<boolean>,
-  skipClarify: Annotation<boolean>,
-  forceReplan: Annotation<boolean>,
-  halt: Annotation<boolean>,
+  goal: Annotation<string>({
+    reducer: lastWrite,
+    default: () => '',
+  }),
+  phase: Annotation<string>({
+    reducer: lastWrite,
+    default: () => 'intake',
+  }),
+  status: Annotation<string>({
+    reducer: lastWrite,
+    default: () => 'running',
+  }),
+  checkpoint: Annotation<Record<string, unknown>>({
+    reducer: (left, right) => ({ ...(left ?? {}), ...(right ?? {}) }),
+    default: () => ({}),
+  }),
+  plan: Annotation<OrchestratorPlan | null>({
+    reducer: lastWrite,
+    default: () => null,
+  }),
+  pendingCommand: Annotation<PendingCommand | null>({
+    reducer: lastWrite,
+    default: () => null,
+  }),
+  stopRequested: Annotation<boolean>({
+    reducer: lastWrite,
+    default: () => false,
+  }),
+  skipClarify: Annotation<boolean>({
+    reducer: lastWrite,
+    default: () => false,
+  }),
+  forceReplan: Annotation<boolean>({
+    reducer: lastWrite,
+    default: () => false,
+  }),
+  halt: Annotation<boolean>({
+    reducer: lastWrite,
+    default: () => false,
+  }),
   createdTaskIds: Annotation<string[]>({
     reducer: (_left, right) => right ?? [],
     default: () => [],

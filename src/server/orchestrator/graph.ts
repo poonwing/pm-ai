@@ -156,3 +156,7 @@ export function getCompiledOrchestratorGraph() {
 export function resetCompiledOrchestratorGraph() {
   _compiled = null;
 }
+
+// State channel reducers changed — drop any stale compiled graph from prior imports.
+resetCompiledOrchestratorGraph();
+
