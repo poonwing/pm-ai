@@ -2,8 +2,9 @@
 name: pm-ai-agent
 description: >-
   Connect to the local PM-AI task management API. Use when the user wants to
-  create, fetch, claim, work on, or complete tasks managed by PM-AI. Create
-  tasks, read inbox, claim, report progress, and mark complete via REST API.
+  create, fetch, claim, work on, complete, cancel, or delete tasks managed by
+  PM-AI. Create tasks, read inbox, claim, report progress, mark complete,
+  cancel, or delete via REST API.
 metadata:
   surfaces:
     - ide
@@ -19,11 +20,14 @@ Connect to the local PM-AI project management system as an **executor agent** th
 
 - You **MAY** create tasks (see below)
 - You **MAY** claim, progress, complete, or release tasks
+- You **MAY** cancel or delete tasks when the user explicitly asks (see below)
 - You **MAY** comment on any task
-- **DO NOT** publish drafts, cancel, approve reviews, or reopen tasks
+- **DO NOT** publish drafts, approve reviews, or reopen tasks
 - **DO NOT** directly edit files under `.pm-ai/tasks/` — use the API for status changes
 - You **MAY** read task markdown files and edit business files in the workspace
 - **DO NOT** `git checkout` or edit business code in the main `workspace_path` when a task has an isolated worktree
+- Prefer **cancel** over **delete** unless the user asks to permanently remove the task
+- **DO NOT** cancel/delete unrelated tasks or bulk-delete without clear user intent
 
 ## Worktree isolation (multi-agent safety)
 
@@ -186,6 +190,36 @@ POST /api/v1/tasks/{task_id}/comments?project_id={project_id}
 ```
 
 Comments also appear on `GET /api/v1/tasks/{task_id}`.
+
+### 9. Cancel a task
+
+Use when the user asks to drop / abandon a task. Works from `draft`, `todo`, or `in_progress`. Soft-cancel: task stays in history as `cancelled`.
+
+```http
+POST /api/v1/tasks/{task_id}/cancel?project_id={project_id}
+{"reason": "需求已變更，不再需要", "agent_name": "cursor"}
+```
+
+- `reason` and `agent_name` are optional but recommended
+- Cancelling clears any active lease/claim
+- Prefer cancel over delete when unsure
+
+### 10. Delete a task
+
+Use only when the user asks to **permanently remove** a task. Deletes the task file, comments, and related DB rows; also tries to clean worktree/branch when present.
+
+```http
+DELETE /api/v1/tasks/{task_id}?project_id={project_id}
+```
+
+Force git cleanup warnings (optional):
+
+```http
+DELETE /api/v1/tasks/{task_id}?project_id={project_id}&force=1
+```
+
+- **Cannot** delete `in_progress` tasks — cancel first, then delete
+- Prefer cancel if the user only wants to stop work
 
 ## Error Handling
 

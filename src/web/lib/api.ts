@@ -409,10 +409,13 @@ export const tasksApi = {
     }),
   publish: (projectId: string, taskId: string) =>
     api<Task>(`/tasks/${taskId}/publish?project_id=${projectId}`, { method: 'POST' }),
-  cancel: (projectId: string, taskId: string, reason?: string) =>
+  cancel: (projectId: string, taskId: string, reason?: string, agentName?: string) =>
     api<Task>(`/tasks/${taskId}/cancel?project_id=${projectId}`, {
       method: 'POST',
-      body: JSON.stringify({ reason }),
+      body: JSON.stringify({
+        ...(reason ? { reason } : {}),
+        ...(agentName ? { agent_name: agentName } : {}),
+      }),
     }),
   reopen: (projectId: string, taskId: string) =>
     api<Task>(`/tasks/${taskId}/reopen?project_id=${projectId}`, { method: 'POST' }),

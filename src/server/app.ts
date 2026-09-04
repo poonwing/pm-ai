@@ -509,12 +509,21 @@ app.post('/api/v1/tasks/:id/publish', authMiddleware('human'), (c) => {
   }
 });
 
-app.post('/api/v1/tasks/:id/cancel', authMiddleware('human'), zValidator('json', CancelTaskSchema), (c) => {
+app.post('/api/v1/tasks/:id/cancel', authMiddleware('any'), zValidator('json', CancelTaskSchema), (c) => {
   try {
     const projectId = c.req.query('project_id');
     if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
     const body = c.req.valid('json');
-    return c.json(taskService.cancelTask(projectId, requireParam(c, 'id'), body.reason));
+    const actor = c.get('actor');
+    if (actor !== 'human' && actor !== 'agent') {
+      return c.json({ error: '此端點僅限人或 Agent', code: 'FORBIDDEN' }, 403);
+    }
+    return c.json(
+      taskService.cancelTask(projectId, requireParam(c, 'id'), body.reason, {
+        actor,
+        actorName: body.agent_name,
+      }),
+    );
   } catch (err) {
     return errorResponse(c, err);
   }
@@ -561,10 +570,14 @@ app.post('/api/v1/tasks/:id/unlock', authMiddleware('human'), (c) => {
   }
 });
 
-app.delete('/api/v1/tasks/:id', authMiddleware('human'), async (c) => {
+app.delete('/api/v1/tasks/:id', authMiddleware('any'), async (c) => {
   try {
     const projectId = c.req.query('project_id');
     if (!projectId) return c.json({ error: '需要 project_id 參數', code: 'VALIDATION' }, 400);
+    const actor = c.get('actor');
+    if (actor !== 'human' && actor !== 'agent') {
+      return c.json({ error: '此端點僅限人或 Agent', code: 'FORBIDDEN' }, 403);
+    }
     const force = c.req.query('force') === '1' || c.req.query('force') === 'true';
     const result = await taskService.deleteTask(projectId, requireParam(c, 'id'), { force });
     return c.json(result);

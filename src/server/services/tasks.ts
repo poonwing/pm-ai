@@ -946,8 +946,17 @@ export function publishTask(projectId: string, taskId: string) {
   return getTask(projectId, taskId);
 }
 
-export function cancelTask(projectId: string, taskId: string, reason?: string) {
-  const result = transitionTask(projectId, taskId, 'cancelled', 'human', undefined, { reason });
+export function cancelTask(
+  projectId: string,
+  taskId: string,
+  reason?: string,
+  opts?: { actor?: 'human' | 'agent'; actorName?: string },
+) {
+  const actor = opts?.actor ?? 'human';
+  const result = transitionTask(projectId, taskId, 'cancelled', actor, opts?.actorName, {
+    reason,
+    clearClaim: true,
+  });
   setImmediate(() => {
     void import('../orchestrator/index.js')
       .then((m) => m.onTaskEvent(projectId, taskId, 'cancelled'))

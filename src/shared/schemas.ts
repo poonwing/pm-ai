@@ -345,6 +345,7 @@ export const RejectReviewSchema = z.object({
 
 export const CancelTaskSchema = z.object({
   reason: z.string().optional(),
+  agent_name: z.string().min(1).optional(),
 });
 
 export const CreateCommentSchema = z.object({
@@ -366,9 +367,9 @@ export const HUMAN_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
 
 /** Agent-only transitions */
 export const AGENT_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
-  draft: [],
-  todo: ['in_progress'],
-  in_progress: ['done', 'todo'],
+  draft: ['cancelled'],
+  todo: ['in_progress', 'cancelled'],
+  in_progress: ['done', 'todo', 'cancelled'],
   /** AI reviewer 可退回重做 */
   done: ['todo'],
   cancelled: [],
